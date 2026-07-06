@@ -26,8 +26,5 @@ struct GetAndRemoveArgs {
 }
 
 fn main() {
-    let _args = Argss::parse();
-
-    eprintln!("unimplemented");
-    std::process::exit(1);
+    panic!()
 }
