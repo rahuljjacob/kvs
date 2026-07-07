@@ -275,6 +275,7 @@ dependencies = [
  "clap",
  "failure",
  "predicates",
+ "serde",
  "tempfile",
  "walkdir",
 ]
