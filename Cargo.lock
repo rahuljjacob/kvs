@@ -276,6 +276,7 @@ dependencies = [
  "failure",
  "predicates",
  "serde",
+ "serde_json",
  "tempfile",
  "walkdir",
 ]
