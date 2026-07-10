@@ -1,6 +1,5 @@
 use clap::{Args, Parser, Subcommand};
 use kvs::Result;
-use serde::{Deserialize, Serialize};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -30,6 +29,5 @@ struct GetAndRemoveArgs {
 fn main() -> Result<()> {
     let _args = Argss::parse();
 
-    eprintln!("unimplemented");
-    std::process::exit(1);
+    Ok(())
 }
