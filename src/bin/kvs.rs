@@ -1,3 +1,5 @@
+use std::env;
+
 use clap::{Args, Parser, Subcommand};
 use kvs::Result;
 
@@ -27,7 +29,25 @@ struct GetAndRemoveArgs {
 }
 
 fn main() -> Result<()> {
-    let _args = Argss::parse();
+    let args = Argss::parse();
+
+    let mut kv_store = kvs::KvStore::open(env::current_dir()?)?;
+
+    match args.command {
+        Command::Set(SetArgs { key, value }) => kv_store.set(key, value)?,
+        Command::Get(GetAndRemoveArgs { key }) => match kv_store.get(key)? {
+            Some(key) => println!("{key}"),
+            None => {
+                println!("Key not found");
+            }
+        },
+        Command::Rm(GetAndRemoveArgs { key }) => {
+            if kv_store.remove(key).is_err() {
+                println!("Key not found");
+                std::process::exit(1);
+            }
+        }
+    };
 
     Ok(())
 }
