@@ -8,8 +8,9 @@ use std::{
 };
 
 pub struct KvStore {
-    store: HashMap<String, u64>,
+    store: HashMap<String, (u64, u64)>,
     path: PathBuf,
+    uncompacted: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -28,6 +29,8 @@ enum WriteCommand {
     Set(Set),
     Rm(Rm),
 }
+
+const THRESHOLD: u64 = 1 * 1024 * 1024;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -49,6 +52,7 @@ impl KvStore {
         let mut kv_store = KvStore {
             store: HashMap::new(),
             path: path,
+            uncompacted: 0,
         };
 
         let mut pos = 0;
@@ -57,7 +61,9 @@ impl KvStore {
             let end_pos = kv_stream.byte_offset() as u64;
             let command = command?;
             match command {
-                WriteCommand::Set(Set { key, value }) => kv_store.store.insert(key, pos),
+                WriteCommand::Set(Set { key, value: _value }) => {
+                    kv_store.store.insert(key, (pos, end_pos - pos))
+                }
                 WriteCommand::Rm(Rm { key }) => kv_store.store.remove(&key),
             };
             pos = end_pos;
@@ -72,7 +78,7 @@ impl KvStore {
             return Ok(None);
         };
 
-        file.seek(SeekFrom::Start(offset))?;
+        file.seek(SeekFrom::Start(offset.0))?;
         let reader = BufReader::new(file);
         let mut kv_stream =
             serde_json::Deserializer::from_reader(reader).into_iter::<WriteCommand>();
@@ -96,16 +102,26 @@ impl KvStore {
         });
         let serialized = serde_json::to_string(&set_op)?;
         file.write_all(serialized.as_bytes())?;
+        let end_offset = file.stream_position()?;
+        let len = end_offset - offset;
 
-        self.store.insert(key, offset);
+        if let Some(old_value) = self.store.get(&key) {
+            self.uncompacted = self.uncompacted + old_value.1;
+        }
+        self.store.insert(key, (offset, len));
+
+        if self.uncompacted > THRESHOLD {
+            self.compact()?;
+        }
+
         Ok(())
     }
 
     // Serialize key and write
     pub fn remove(&mut self, key: String) -> Result<()> {
-        let exists = self.store.get(&key);
-
-        if exists.is_none() {
+        if let Some(old_value) = self.store.get(&key) {
+            self.uncompacted = self.uncompacted + old_value.1
+        } else {
             return Err(failure::format_err!("Key not found"));
         }
 
@@ -114,6 +130,42 @@ impl KvStore {
         let serialized = serde_json::to_string(&del_op)?;
         let mut file = File::options().append(true).create(true).open(&self.path)?;
         file.write_all(serialized.as_bytes())?;
+
+        if self.uncompacted > THRESHOLD {
+            self.compact()?;
+        }
+
+        Ok(())
+    }
+
+    pub fn compact(&mut self) -> Result<()> {
+        let path = self.path.clone();
+        let path = path.with_file_name("db2.txt");
+        let mut new_store: HashMap<String, (u64, u64)> = HashMap::new();
+
+        let mut file = File::options()
+            .append(true)
+            .read(true)
+            .create(true)
+            .open(&path)?;
+
+        for (key, _) in self.store.clone() {
+            let value = self.get(key.clone())?.unwrap();
+            let new_offset = file.stream_position()?;
+            let set_op = WriteCommand::Set(Set {
+                key: key.clone(),
+                value,
+            });
+            let serialized = serde_json::to_string(&set_op)?;
+            file.write_all(serialized.as_bytes())?;
+            let end_offset = file.stream_position()?;
+
+            new_store.insert(key, (new_offset, end_offset - new_offset));
+        }
+
+        std::fs::rename(&path, &self.path)?;
+        self.store = new_store;
+        self.uncompacted = 0;
 
         Ok(())
     }
