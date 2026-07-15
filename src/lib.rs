@@ -17,13 +17,18 @@ pub struct KvStore {
 
 #[derive(Serialize, Deserialize)]
 pub struct Set {
-    key: String,
-    value: String,
+    pub key: String,
+    pub value: String,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct Rm {
-    key: String,
+    pub key: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Get {
+    pub key: String,
 }
 
 pub struct KvsServer {
@@ -37,8 +42,22 @@ pub struct KvsClient {
 }
 
 #[derive(Serialize, Deserialize)]
+enum Response {
+    SetResp(bool),
+    RmResp(bool),
+    GetResp(Option<String>),
+}
+
+#[derive(Serialize, Deserialize)]
 enum WriteCommand {
     Set(Set),
+    Rm(Rm),
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum CommandSer {
+    Set(Set),
+    Get(Get),
     Rm(Rm),
 }
 
@@ -208,10 +227,33 @@ impl KvsClient {
         KvsClient { addr }
     }
 
-    pub fn connect(&self) -> Result<()> {
-        let _connection = TcpStream::connect(&self.addr)?;
+    pub fn send(&self, command: CommandSer) -> Result<()> {
+        let connection = TcpStream::connect(&self.addr)?;
 
-        println!("Success");
+        serde_json::to_writer(&connection, &command)?;
+
+        let message: Response = serde_json::from_reader(connection)?;
+
+        match message {
+            Response::GetResp(value) => match value {
+                Some(value) => println!("{value}"),
+                None => println!("Key not found"),
+            },
+            Response::RmResp(exit_bool) => {
+                if exit_bool == true {
+                    println!("Remove Succeeded");
+                } else {
+                    return Err(failure::format_err!("Key not found"));
+                }
+            }
+            Response::SetResp(exit_bool) => {
+                if exit_bool == true {
+                    println!("Set Succeeded");
+                } else {
+                    println!("Key not Found")
+                }
+            }
+        }
         Ok(())
     }
 }
