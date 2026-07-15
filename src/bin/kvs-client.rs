@@ -6,6 +6,8 @@ use kvs::Result;
 struct Argss {
     #[command(subcommand)]
     command: Command,
+    #[arg(long, default_value = "127.0.0.1:4000", global = true)]
+    addr: String,
 }
 
 #[derive(Subcommand)]
