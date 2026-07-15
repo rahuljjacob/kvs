@@ -1,6 +1,7 @@
 use clap::Parser;
-use kvs::Result;
+use kvs::{KvsServer, Result};
 use slog::{Drain, info, o};
+use std::net::{TcpListener, TcpStream};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -19,7 +20,11 @@ fn main() -> Result<()> {
 
     let args = Argss::parse();
 
-    info!(logger, "Starting Server"; "version" => env!("CARGO_PKG_VERSION"), "engine" => args.engine, "address" => args.addr);
+    info!(&logger, "Starting Server"; "version" => env!("CARGO_PKG_VERSION"), "engine" => &args.engine, "address" => &args.addr);
+
+    let kvs_server = KvsServer::new(args.addr, args.engine, logger);
+
+    kvs_server.accept_clients()?;
 
     Ok(())
 }

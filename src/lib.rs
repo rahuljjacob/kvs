@@ -1,5 +1,7 @@
 use failure::Error;
 use serde::{Deserialize, Serialize};
+use slog::{Logger, info};
+use std::net::{TcpListener, TcpStream};
 use std::{
     collections::HashMap,
     fs::File,
@@ -22,6 +24,16 @@ pub struct Set {
 #[derive(Serialize, Deserialize)]
 pub struct Rm {
     key: String,
+}
+
+pub struct KvsServer {
+    addr: String,
+    engine: String,
+    logger: Logger,
+}
+
+pub struct KvsClient {
+    addr: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -167,6 +179,39 @@ impl KvStore {
         self.store = new_store;
         self.uncompacted = 0;
 
+        Ok(())
+    }
+}
+
+impl KvsServer {
+    pub fn new(addr: String, engine: String, logger: Logger) -> KvsServer {
+        KvsServer {
+            addr,
+            engine,
+            logger,
+        }
+    }
+
+    pub fn accept_clients(&self) -> Result<()> {
+        let listener = TcpListener::bind(&self.addr)?;
+
+        for _stream in listener.incoming() {
+            info!(&self.logger, "Client connected");
+        }
+
+        Ok(())
+    }
+}
+
+impl KvsClient {
+    pub fn new(addr: String) -> KvsClient {
+        KvsClient { addr }
+    }
+
+    pub fn connect(&self) -> Result<()> {
+        let _connection = TcpStream::connect(&self.addr)?;
+
+        println!("Success");
         Ok(())
     }
 }

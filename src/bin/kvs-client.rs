@@ -1,5 +1,5 @@
 use clap::{Args, Parser, Subcommand};
-use kvs::Result;
+use kvs::{KvsClient, Result};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -29,7 +29,11 @@ struct GetAndRemoveArgs {
 }
 
 fn main() -> Result<()> {
-    let _args = Argss::parse();
+    let args = Argss::parse();
+
+    let kvs_client = KvsClient::new(args.addr);
+
+    kvs_client.connect()?;
 
     Ok(())
 }
