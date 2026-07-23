@@ -1,5 +1,6 @@
 use failure::{Error, err_msg};
 use serde::{Deserialize, Serialize};
+use sled::Db;
 use slog::{Logger, info};
 use std::net::{TcpListener, TcpStream};
 use std::{
@@ -13,6 +14,10 @@ pub struct KvStore {
     store: HashMap<String, (u64, u64)>,
     path: PathBuf,
     uncompacted: u64,
+}
+
+pub struct SledKvsEngine {
+    pub store: Db,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -138,6 +143,37 @@ impl KvsEngine for KvStore {
         }
 
         Ok(())
+    }
+}
+
+impl KvsEngine for SledKvsEngine {
+    fn get(&mut self, key: String) -> Result<Option<String>> {
+        let result = self.store.get(key)?;
+        match result {
+            Some(value) => Ok(Some(String::from_utf8(value.to_vec())?)),
+            None => Ok(None),
+        }
+    }
+
+    fn set(&mut self, key: String, value: String) -> Result<()> {
+        self.store.insert(key, value.as_bytes())?;
+        Ok(())
+    }
+
+    fn remove(&mut self, key: String) -> Result<()> {
+        let result = self.store.remove(key)?;
+        match result {
+            Some(_) => Ok(()),
+            None => return Err(failure::format_err!("Key Not Found")),
+        }
+    }
+}
+
+impl SledKvsEngine {
+    pub fn open(path: impl Into<PathBuf>) -> Result<SledKvsEngine> {
+        let path: PathBuf = path.into();
+        let db = sled::open(path)?;
+        Ok(SledKvsEngine { store: db })
     }
 }
 
@@ -308,7 +344,7 @@ impl KvsClient {
                     }
 
                     None => {
-                        println!("Key Not Found");
+                        println!("Key not found");
                         Ok(())
                     }
                 },
@@ -317,19 +353,13 @@ impl KvsClient {
                 }
             },
             Response::RmResp(result) => match result {
-                Ok(_) => {
-                    println!("Value Removed");
-                    Ok(())
-                }
+                Ok(_) => Ok(()),
                 Err(e) => {
                     return Err(err_msg(e));
                 }
             },
             Response::SetResp(result) => match result {
-                Ok(_) => {
-                    println!("Value Set");
-                    Ok(())
-                }
+                Ok(_) => Ok(()),
 
                 Err(e) => {
                     return Err(err_msg(e));

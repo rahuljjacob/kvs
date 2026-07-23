@@ -1,7 +1,8 @@
 use clap::Parser;
-use kvs::{KvStore, KvsServer, Result};
+use kvs::{KvStore, KvsEngine, KvsServer, Result, SledKvsEngine};
 use slog::{Drain, info, o};
 use std::env;
+use std::path::Path;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -20,17 +21,39 @@ fn main() -> Result<()> {
 
     let args = Argss::parse();
 
+    check_engine(&env::current_dir()?, &args.engine)?;
+
     info!(&logger, "Starting Server"; "version" => env!("CARGO_PKG_VERSION"), "engine" => &args.engine, "address" => &args.addr);
 
-    let kv_store = KvStore::open(env::current_dir()?)?;
+    let store: Box<dyn KvsEngine> = if args.engine == "kvs" {
+        Box::new(KvStore::open(env::current_dir()?)?)
+    } else if args.engine == "sled" {
+        Box::new(SledKvsEngine::open(env::current_dir()?)?)
+    } else {
+        return Err(failure::format_err!("What engine bruh"));
+    };
 
     let mut kv_server = KvsServer {
         addr: args.addr,
-        engine: Box::new(kv_store),
+        engine: store,
         logger,
     };
 
     kv_server.request_loop()?;
+
+    Ok(())
+}
+
+fn check_engine(path: &Path, engine: &str) -> Result<()> {
+    let marker_path = path.join("engine");
+    let existing = std::fs::read_to_string(&marker_path).unwrap_or_default();
+    let existing = existing.trim();
+
+    if existing.is_empty() {
+        std::fs::write(marker_path, engine)?;
+    } else if existing != engine {
+        return Err(failure::format_err!("Wrong engine for this directory"));
+    }
 
     Ok(())
 }
