@@ -10,6 +10,12 @@ use std::{
     path::PathBuf,
 };
 
+const THRESHOLD: u64 = 1 * 1024 * 1024;
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+pub mod thread_pool;
+
 pub struct KvStore {
     store: HashMap<String, (u64, u64)>,
     path: PathBuf,
@@ -73,10 +79,6 @@ pub enum CommandSer {
     Get(Get),
     Rm(Rm),
 }
-
-const THRESHOLD: u64 = 1 * 1024 * 1024;
-
-pub type Result<T> = std::result::Result<T, Error>;
 
 impl KvsEngine for KvStore {
     fn get(&mut self, key: String) -> Result<Option<String>> {
@@ -157,14 +159,16 @@ impl KvsEngine for SledKvsEngine {
 
     fn set(&mut self, key: String, value: String) -> Result<()> {
         self.store.insert(key, value.as_bytes())?;
+        self.store.flush()?;
         Ok(())
     }
 
     fn remove(&mut self, key: String) -> Result<()> {
         let result = self.store.remove(key)?;
+        self.store.flush()?;
         match result {
             Some(_) => Ok(()),
-            None => return Err(failure::format_err!("Key Not Found")),
+            None => return Err(failure::format_err!("Key not found")),
         }
     }
 }
