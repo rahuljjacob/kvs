@@ -1,7 +1,7 @@
 use failure::{Error, err_msg};
 use serde::{Deserialize, Serialize};
 use sled::Db;
-use slog::{Logger, info};
+use slog::{Logger, error};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 use std::{
@@ -10,6 +10,9 @@ use std::{
     io::{BufReader, Seek, SeekFrom, Write},
     path::PathBuf,
 };
+use thread_pool::NaiveThreadPool;
+
+use crate::thread_pool::ThreadPool;
 
 const THRESHOLD: u64 = 1 * 1024 * 1024;
 
@@ -288,75 +291,85 @@ impl KvStore {
 }
 
 impl<E: KvsEngine> KvsServer<E> {
-    pub fn request_loop(&mut self) -> Result<()> {
+    pub fn request_loop(&self) -> Result<()> {
         let listener = TcpListener::bind(&self.addr)?;
+        let thread_pool = NaiveThreadPool::new(8)?;
 
         for stream in listener.incoming() {
-            let stream = stream?;
-            info!(&self.logger, "Client connected");
-            self.handle_request(stream)?;
+            match stream {
+                Ok(connection) => {
+                    let engine = self.engine.clone();
+                    let logger = self.logger.clone();
+                    thread_pool.spawn(move || {
+                        if let Err(e) = handle_request(engine, connection) {
+                            error!(logger, "Request Failed to execute"; "err" => e.to_string())
+                        }
+                    });
+                }
+                Err(e) => error!(self.logger, "Connection Failed"; "err" => e.to_string()),
+            }
         }
 
         Ok(())
     }
+}
 
-    fn handle_request(&mut self, connection: TcpStream) -> Result<()> {
-        let command: CommandSer = serde_json::Deserializer::from_reader(&connection)
-            .into_iter::<CommandSer>()
-            .next()
-            .unwrap()?;
+fn handle_request<E: KvsEngine>(engine: E, connection: TcpStream) -> Result<()> {
+    let command: CommandSer = serde_json::Deserializer::from_reader(&connection)
+        .into_iter::<CommandSer>()
+        .next()
+        .unwrap()?;
 
-        match command {
-            CommandSer::Get(Get { key }) => {
-                let res = self.engine.get(key);
-                match res {
-                    Ok(val) => {
-                        match val {
-                            Some(value) => {
-                                serde_json::to_writer(
-                                    &connection,
-                                    &Response::GetResp(Ok(Some(value))),
-                                )?;
-                            }
-                            None => {
-                                // Send Key not found : String
-                                serde_json::to_writer(&connection, &Response::GetResp(Ok(None)))?;
-                            }
+    match command {
+        CommandSer::Get(Get { key }) => {
+            let res = engine.get(key);
+            match res {
+                Ok(val) => {
+                    match val {
+                        Some(value) => {
+                            serde_json::to_writer(
+                                &connection,
+                                &Response::GetResp(Ok(Some(value))),
+                            )?;
+                        }
+                        None => {
+                            // Send Key not found : String
+                            serde_json::to_writer(&connection, &Response::GetResp(Ok(None)))?;
                         }
                     }
-                    Err(e) => {
-                        serde_json::to_writer(&connection, &Response::GetResp(Err(e.to_string())))?;
-                    }
+                }
+                Err(e) => {
+                    serde_json::to_writer(&connection, &Response::GetResp(Err(e.to_string())))?;
                 }
             }
-            CommandSer::Set(Set { key, value }) => {
-                let res = self.engine.set(key, value);
-                match res {
-                    Ok(()) => {
-                        let response = Response::SetResp(Ok(()));
-                        serde_json::to_writer(&connection, &response)?;
-                    }
-                    Err(e) => {
-                        serde_json::to_writer(&connection, &Response::SetResp(Err(e.to_string())))?;
-                    }
+        }
+        CommandSer::Set(Set { key, value }) => {
+            let res = engine.set(key, value);
+            match res {
+                Ok(()) => {
+                    let response = Response::SetResp(Ok(()));
+                    serde_json::to_writer(&connection, &response)?;
+                }
+                Err(e) => {
+                    serde_json::to_writer(&connection, &Response::SetResp(Err(e.to_string())))?;
                 }
             }
-            CommandSer::Rm(Rm { key }) => {
-                let res = self.engine.remove(key);
-                match res {
-                    Ok(()) => {
-                        let response = Response::RmResp(Ok(()));
-                        serde_json::to_writer(&connection, &response)?;
-                    }
-                    Err(e) => {
-                        serde_json::to_writer(&connection, &Response::RmResp(Err(e.to_string())))?;
-                    }
+        }
+        CommandSer::Rm(Rm { key }) => {
+            let res = engine.remove(key);
+            match res {
+                Ok(()) => {
+                    let response = Response::RmResp(Ok(()));
+                    serde_json::to_writer(&connection, &response)?;
+                }
+                Err(e) => {
+                    serde_json::to_writer(&connection, &Response::RmResp(Err(e.to_string())))?;
                 }
             }
-        };
+        }
+    };
 
-        Ok(())
-    }
+    Ok(())
 }
 
 impl KvsClient {

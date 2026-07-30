@@ -27,7 +27,7 @@ fn main() -> Result<()> {
 
     if args.engine == "kvs" {
         let engine = KvStore::open(env::current_dir()?)?;
-        let mut kv_server = KvsServer {
+        let kv_server = KvsServer {
             addr: args.addr,
             engine,
             logger,
@@ -35,7 +35,7 @@ fn main() -> Result<()> {
         kv_server.request_loop()?
     } else if args.engine == "sled" {
         let engine = SledKvsEngine::open(env::current_dir()?)?;
-        let mut kv_server = KvsServer {
+        let kv_server = KvsServer {
             addr: args.addr,
             engine,
             logger,
