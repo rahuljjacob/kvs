@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use sled::Db;
 use slog::{Logger, info};
 use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
 use std::{
     collections::HashMap,
     fs::File,
@@ -16,15 +17,21 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 pub mod thread_pool;
 
-pub struct KvStore {
+pub struct SharedKvStore {
     store: HashMap<String, (u64, u64)>,
     path: PathBuf,
     uncompacted: u64,
 }
 
-pub struct SledKvsEngine {
+#[derive(Clone)]
+pub struct KvStore(Arc<Mutex<SharedKvStore>>);
+
+pub struct SharedSledKvsEngine {
     pub store: Db,
 }
+
+#[derive(Clone)]
+pub struct SledKvsEngine(Arc<Mutex<SharedSledKvsEngine>>);
 
 #[derive(Serialize, Deserialize)]
 pub struct Set {
@@ -42,9 +49,9 @@ pub struct Get {
     pub key: String,
 }
 
-pub struct KvsServer {
+pub struct KvsServer<E: KvsEngine> {
     pub addr: String,
-    pub engine: Box<dyn KvsEngine>,
+    pub engine: E,
     pub logger: Logger,
 }
 
@@ -52,12 +59,12 @@ pub struct KvsClient {
     addr: String,
 }
 
-pub trait KvsEngine {
-    fn get(&mut self, key: String) -> Result<Option<String>>;
+pub trait KvsEngine: Clone + Send + 'static {
+    fn get(&self, key: String) -> Result<Option<String>>;
 
-    fn set(&mut self, key: String, value: String) -> Result<()>;
+    fn set(&self, key: String, value: String) -> Result<()>;
 
-    fn remove(&mut self, key: String) -> Result<()>;
+    fn remove(&self, key: String) -> Result<()>;
 }
 
 #[derive(Serialize, Deserialize)]
@@ -81,9 +88,10 @@ pub enum CommandSer {
 }
 
 impl KvsEngine for KvStore {
-    fn get(&mut self, key: String) -> Result<Option<String>> {
-        let mut file = File::open(&self.path)?;
-        let Some(offset) = self.store.get(&key).copied() else {
+    fn get(&self, key: String) -> Result<Option<String>> {
+        let kv_store = self.0.lock().unwrap();
+        let mut file = File::open(&kv_store.path)?;
+        let Some(offset) = kv_store.store.get(&key).copied() else {
             return Ok(None);
         };
 
@@ -101,8 +109,12 @@ impl KvsEngine for KvStore {
     }
 
     // Serialize key and value using Serde and write to file
-    fn set(&mut self, key: String, value: String) -> Result<()> {
-        let mut file = File::options().append(true).create(true).open(&self.path)?;
+    fn set(&self, key: String, value: String) -> Result<()> {
+        let mut kv_store = self.0.lock().unwrap();
+        let mut file = File::options()
+            .append(true)
+            .create(true)
+            .open(&kv_store.path)?;
         let offset = file.seek(SeekFrom::End(0))?;
 
         let set_op = WriteCommand::Set(Set {
@@ -114,34 +126,38 @@ impl KvsEngine for KvStore {
         let end_offset = file.stream_position()?;
         let len = end_offset - offset;
 
-        if let Some(old_value) = self.store.get(&key) {
-            self.uncompacted = self.uncompacted + old_value.1;
+        if let Some(old_value) = kv_store.store.get(&key) {
+            kv_store.uncompacted = kv_store.uncompacted + old_value.1;
         }
-        self.store.insert(key, (offset, len));
+        kv_store.store.insert(key, (offset, len));
 
-        if self.uncompacted > THRESHOLD {
-            self.compact()?;
+        if kv_store.uncompacted > THRESHOLD {
+            kv_store.compact()?;
         }
 
         Ok(())
     }
 
     // Serialize key and write
-    fn remove(&mut self, key: String) -> Result<()> {
-        if let Some(old_value) = self.store.get(&key) {
-            self.uncompacted = self.uncompacted + old_value.1
+    fn remove(&self, key: String) -> Result<()> {
+        let mut kv_store = self.0.lock().unwrap();
+        if let Some(old_value) = kv_store.store.get(&key) {
+            kv_store.uncompacted = kv_store.uncompacted + old_value.1
         } else {
             return Err(failure::format_err!("Key not found"));
         }
 
-        self.store.remove(&key);
+        kv_store.store.remove(&key);
         let del_op = WriteCommand::Rm(Rm { key });
         let serialized = serde_json::to_string(&del_op)?;
-        let mut file = File::options().append(true).create(true).open(&self.path)?;
+        let mut file = File::options()
+            .append(true)
+            .create(true)
+            .open(&kv_store.path)?;
         file.write_all(serialized.as_bytes())?;
 
-        if self.uncompacted > THRESHOLD {
-            self.compact()?;
+        if kv_store.uncompacted > THRESHOLD {
+            kv_store.compact()?;
         }
 
         Ok(())
@@ -149,23 +165,26 @@ impl KvsEngine for KvStore {
 }
 
 impl KvsEngine for SledKvsEngine {
-    fn get(&mut self, key: String) -> Result<Option<String>> {
-        let result = self.store.get(key)?;
+    fn get(&self, key: String) -> Result<Option<String>> {
+        let sled_store = self.0.lock().unwrap();
+        let result = sled_store.store.get(key)?;
         match result {
             Some(value) => Ok(Some(String::from_utf8(value.to_vec())?)),
             None => Ok(None),
         }
     }
 
-    fn set(&mut self, key: String, value: String) -> Result<()> {
-        self.store.insert(key, value.as_bytes())?;
-        self.store.flush()?;
+    fn set(&self, key: String, value: String) -> Result<()> {
+        let sled_store = self.0.lock().unwrap();
+        sled_store.store.insert(key, value.as_bytes())?;
+        sled_store.store.flush()?;
         Ok(())
     }
 
-    fn remove(&mut self, key: String) -> Result<()> {
-        let result = self.store.remove(key)?;
-        self.store.flush()?;
+    fn remove(&self, key: String) -> Result<()> {
+        let sled_store = self.0.lock().unwrap();
+        let result = sled_store.store.remove(key)?;
+        sled_store.store.flush()?;
         match result {
             Some(_) => Ok(()),
             None => return Err(failure::format_err!("Key not found")),
@@ -177,11 +196,13 @@ impl SledKvsEngine {
     pub fn open(path: impl Into<PathBuf>) -> Result<SledKvsEngine> {
         let path: PathBuf = path.into();
         let db = sled::open(path)?;
-        Ok(SledKvsEngine { store: db })
+        Ok(SledKvsEngine(Arc::new(Mutex::new(SharedSledKvsEngine {
+            store: db,
+        }))))
     }
 }
 
-impl KvStore {
+impl SharedKvStore {
     pub fn compact(&mut self) -> Result<()> {
         let path = self.path.clone();
         let path = path.with_file_name("db2.txt");
@@ -193,8 +214,20 @@ impl KvStore {
             .create(true)
             .open(&path)?;
 
+        let mut reader = BufReader::new(File::open(&self.path)?);
+
         for (key, _) in self.store.clone() {
-            let value = self.get(key.clone())?.unwrap();
+            let offset = self.store.get(&key).copied().unwrap();
+            reader.seek(SeekFrom::Start(offset.0))?;
+
+            let mut kv_stream =
+                serde_json::Deserializer::from_reader(&mut reader).into_iter::<WriteCommand>();
+
+            let value = match kv_stream.next().unwrap()? {
+                WriteCommand::Set(set) => set.value,
+                WriteCommand::Rm(_) => unreachable!(),
+            };
+
             let new_offset = file.stream_position()?;
             let set_op = WriteCommand::Set(Set {
                 key: key.clone(),
@@ -213,7 +246,9 @@ impl KvStore {
 
         Ok(())
     }
+}
 
+impl KvStore {
     pub fn open(temp_path: impl Into<PathBuf>) -> Result<KvStore> {
         let path: PathBuf = temp_path.into();
         let path = path.join("db.txt");
@@ -228,7 +263,7 @@ impl KvStore {
         let mut kv_stream =
             serde_json::Deserializer::from_reader(reader).into_iter::<WriteCommand>();
 
-        let mut kv_store = KvStore {
+        let mut kv_store = SharedKvStore {
             store: HashMap::new(),
             path: path,
             uncompacted: 0,
@@ -248,11 +283,11 @@ impl KvStore {
             pos = end_pos;
         }
 
-        Ok(kv_store)
+        Ok(KvStore(Arc::new(Mutex::new(kv_store))))
     }
 }
 
-impl KvsServer {
+impl<E: KvsEngine> KvsServer<E> {
     pub fn request_loop(&mut self) -> Result<()> {
         let listener = TcpListener::bind(&self.addr)?;
 

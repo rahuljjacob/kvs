@@ -1,5 +1,5 @@
 use clap::Parser;
-use kvs::{KvStore, KvsEngine, KvsServer, Result, SledKvsEngine};
+use kvs::{KvStore, KvsServer, Result, SledKvsEngine};
 use slog::{Drain, info, o};
 use std::env;
 use std::path::Path;
@@ -25,21 +25,25 @@ fn main() -> Result<()> {
 
     info!(&logger, "Starting Server"; "version" => env!("CARGO_PKG_VERSION"), "engine" => &args.engine, "address" => &args.addr);
 
-    let store: Box<dyn KvsEngine> = if args.engine == "kvs" {
-        Box::new(KvStore::open(env::current_dir()?)?)
+    if args.engine == "kvs" {
+        let engine = KvStore::open(env::current_dir()?)?;
+        let mut kv_server = KvsServer {
+            addr: args.addr,
+            engine,
+            logger,
+        };
+        kv_server.request_loop()?
     } else if args.engine == "sled" {
-        Box::new(SledKvsEngine::open(env::current_dir()?)?)
+        let engine = SledKvsEngine::open(env::current_dir()?)?;
+        let mut kv_server = KvsServer {
+            addr: args.addr,
+            engine,
+            logger,
+        };
+        kv_server.request_loop()?
     } else {
         return Err(failure::format_err!("What engine bruh"));
-    };
-
-    let mut kv_server = KvsServer {
-        addr: args.addr,
-        engine: store,
-        logger,
-    };
-
-    kv_server.request_loop()?;
+    }
 
     Ok(())
 }
