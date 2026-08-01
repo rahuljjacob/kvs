@@ -10,7 +10,7 @@ use std::{
     io::{BufReader, Seek, SeekFrom, Write},
     path::PathBuf,
 };
-use thread_pool::NaiveThreadPool;
+use thread_pool::SharedQueueThreadPool;
 
 use crate::thread_pool::ThreadPool;
 
@@ -293,7 +293,7 @@ impl KvStore {
 impl<E: KvsEngine> KvsServer<E> {
     pub fn request_loop(&self) -> Result<()> {
         let listener = TcpListener::bind(&self.addr)?;
-        let thread_pool = NaiveThreadPool::new(8)?;
+        let thread_pool = SharedQueueThreadPool::new(8)?;
 
         for stream in listener.incoming() {
             match stream {
