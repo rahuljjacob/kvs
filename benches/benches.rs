@@ -1,12 +1,12 @@
 use criterion::Criterion;
 use criterion::{criterion_group, criterion_main};
-use kvs::{KvsEngine, SharedKvStore, SharedSledKvsEngine};
+use kvs::{KvStore, KvsEngine, SledKvsEngine};
 use rand::Rng;
 use tempfile::TempDir;
 
 fn kvs_write(c: &mut Criterion) {
     let temp_dir = TempDir::new().unwrap();
-    let mut kv_store = SharedKvStore::open(temp_dir.path()).unwrap();
+    let mut kv_store = KvStore::open(temp_dir.path()).unwrap();
 
     let mut rng = rand::thread_rng();
 
@@ -31,7 +31,7 @@ fn kvs_write(c: &mut Criterion) {
 
 fn sled_write(c: &mut Criterion) {
     let temp_dir = TempDir::new().unwrap();
-    let mut kv_store = SharedSledKvsEngine::open(temp_dir.path()).unwrap();
+    let mut kv_store = SledKvsEngine::open(temp_dir.path()).unwrap();
 
     let mut rng = rand::thread_rng();
 
@@ -56,7 +56,7 @@ fn sled_write(c: &mut Criterion) {
 
 fn kvs_read(c: &mut Criterion) {
     let temp_dir = TempDir::new().unwrap();
-    let mut kv_store = SharedKvStore::open(temp_dir.path()).unwrap();
+    let mut kv_store = KvStore::open(temp_dir.path()).unwrap();
 
     let mut rng = rand::thread_rng();
 
@@ -88,7 +88,7 @@ fn kvs_read(c: &mut Criterion) {
 
 fn sled_read(c: &mut Criterion) {
     let temp_dir = TempDir::new().unwrap();
-    let mut sled_store = SharedSledKvsEngine::open(temp_dir.path()).unwrap();
+    let mut sled_store = SledKvsEngine::open(temp_dir.path()).unwrap();
 
     let mut rng = rand::thread_rng();
 

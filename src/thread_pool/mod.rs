@@ -1,5 +1,4 @@
 use crate::Result;
-use std::thread;
 
 mod naive;
 mod rayon;

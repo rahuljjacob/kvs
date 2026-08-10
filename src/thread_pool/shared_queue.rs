@@ -5,7 +5,7 @@ use std::thread;
 
 enum ThreadPoolMessage {
     RunJob(Box<dyn FnOnce() + Send + 'static>),
-    Shutdown,
+    // Shutdown,
 }
 
 struct Worker {
@@ -24,7 +24,7 @@ impl Worker {
         for job in self.receiver.iter() {
             match job {
                 ThreadPoolMessage::RunJob(job_exec) => job_exec(),
-                ThreadPoolMessage::Shutdown => return,
+                // ThreadPoolMessage::Shutdown => return,
             }
         }
     }
