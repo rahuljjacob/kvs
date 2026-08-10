@@ -1,13 +1,14 @@
 use crate::shared::Response;
 pub use crate::shared::{CommandSerialized, Get, Result, Rm, Set};
-use crate::thread_pool::{SharedQueueThreadPool, ThreadPool};
+use crate::thread_pool::ThreadPool;
 use slog::{Logger, error};
 use std::net::{TcpListener, TcpStream};
 
-pub struct KvsServer<E: KvsEngine> {
+pub struct KvsServer<E: KvsEngine, P: ThreadPool> {
     pub addr: String,
     pub engine: E,
     pub logger: Logger,
+    pub thread_pool: P,
 }
 
 pub trait KvsEngine: Clone + Send + 'static {
@@ -18,17 +19,25 @@ pub trait KvsEngine: Clone + Send + 'static {
     fn remove(&self, key: String) -> Result<()>;
 }
 
-impl<E: KvsEngine> KvsServer<E> {
+impl<E: KvsEngine, P: ThreadPool> KvsServer<E, P> {
+    pub fn new(addr: String, engine: E, logger: Logger, thread_pool: P) -> Self {
+        KvsServer {
+            addr,
+            engine,
+            logger,
+            thread_pool,
+        }
+    }
+
     pub fn request_loop(&self) -> Result<()> {
         let listener = TcpListener::bind(&self.addr)?;
-        let thread_pool = SharedQueueThreadPool::new(8)?;
 
         for stream in listener.incoming() {
             match stream {
                 Ok(connection) => {
                     let engine = self.engine.clone();
                     let logger = self.logger.clone();
-                    thread_pool.spawn(move || {
+                    self.thread_pool.spawn(move || {
                         if let Err(e) = handle_request(engine, connection) {
                             error!(logger, "Request Failed to execute"; "err" => e.to_string())
                         }

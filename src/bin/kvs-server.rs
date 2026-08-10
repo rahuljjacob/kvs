@@ -1,4 +1,5 @@
 use clap::Parser;
+use kvs::thread_pool::{SharedQueueThreadPool, ThreadPool};
 use kvs::{KvStore, KvsServer, Result, SledKvsEngine};
 use slog::{Drain, info, o};
 use std::env;
@@ -27,19 +28,13 @@ fn main() -> Result<()> {
 
     if args.engine == "kvs" {
         let engine = KvStore::open(env::current_dir()?)?;
-        let kv_server = KvsServer {
-            addr: args.addr,
-            engine,
-            logger,
-        };
+        let thread_pool = SharedQueueThreadPool::new(num_cpus::get() as u32)?;
+        let kv_server = KvsServer::new(args.addr, engine, logger, thread_pool);
         kv_server.request_loop()?
     } else if args.engine == "sled" {
         let engine = SledKvsEngine::open(env::current_dir()?)?;
-        let kv_server = KvsServer {
-            addr: args.addr,
-            engine,
-            logger,
-        };
+        let thread_pool = SharedQueueThreadPool::new(num_cpus::get() as u32)?;
+        let kv_server = KvsServer::new(args.addr, engine, logger, thread_pool);
         kv_server.request_loop()?
     } else {
         return Err(failure::format_err!("What engine bruh"));
