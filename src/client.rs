@@ -1,4 +1,4 @@
-use crate::shared::{CommandSerialized, Response, Result};
+use crate::shared::{CommandSerialized, Get, Response, Result, Rm, Set};
 use failure::err_msg;
 use std::net::TcpStream;
 
@@ -11,7 +11,37 @@ impl KvsClient {
         KvsClient { addr }
     }
 
-    pub fn send(&self, command: CommandSerialized) -> Result<()> {
+    pub fn rm(&self, key: String) -> Result<()> {
+        match self.request(CommandSerialized::Rm(Rm { key })) {
+            Ok(response) => match response {
+                Response::RmResp(result) => result.map_err(err_msg),
+                _ => Err(err_msg("Invalid Response")),
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn set(&self, key: String, value: String) -> Result<()> {
+        match self.request(CommandSerialized::Set(Set { key, value })) {
+            Ok(response) => match response {
+                Response::SetResp(result) => result.map_err(err_msg),
+                _ => Err(err_msg("Invalid Response")),
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn get(&self, key: String) -> Result<Option<String>> {
+        match self.request(CommandSerialized::Get(Get { key })) {
+            Ok(response) => match response {
+                Response::GetResp(result) => result.map_err(err_msg),
+                _ => Err(err_msg("Invalid Response")),
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    fn request(&self, command: CommandSerialized) -> Result<Response> {
         let connection = TcpStream::connect(&self.addr)?;
 
         serde_json::to_writer(&connection, &command)?;
@@ -21,36 +51,6 @@ impl KvsClient {
             .next()
             .unwrap()?;
 
-        match message {
-            Response::GetResp(result) => match result {
-                Ok(value) => match value {
-                    Some(val) => {
-                        println!("{}", &val);
-                        Ok(())
-                    }
-
-                    None => {
-                        println!("Key not found");
-                        Ok(())
-                    }
-                },
-                Err(e) => {
-                    return Err(err_msg(e));
-                }
-            },
-            Response::RmResp(result) => match result {
-                Ok(_) => Ok(()),
-                Err(e) => {
-                    return Err(err_msg(e));
-                }
-            },
-            Response::SetResp(result) => match result {
-                Ok(_) => Ok(()),
-
-                Err(e) => {
-                    return Err(err_msg(e));
-                }
-            },
-        }
+        Ok(message)
     }
 }

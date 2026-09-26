@@ -1,5 +1,5 @@
 use clap::{Args, Parser, Subcommand};
-use kvs::{CommandSerialized, Get, KvsClient, Result, Rm, Set};
+use kvs::{KvsClient, Result};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -30,16 +30,16 @@ struct GetAndRemoveArgs {
 
 fn main() -> Result<()> {
     let args = Argss::parse();
-
-    let command_to_send = match args.command {
-        Command::Set(SetArgs { key, value }) => CommandSerialized::Set(Set { key, value }),
-        Command::Get(GetAndRemoveArgs { key }) => CommandSerialized::Get(Get { key }),
-        Command::Rm(GetAndRemoveArgs { key }) => CommandSerialized::Rm(Rm { key }),
-    };
-
     let kvs_client = KvsClient::new(args.addr);
 
-    kvs_client.send(command_to_send)?;
+    match args.command {
+        Command::Set(SetArgs { key, value }) => kvs_client.set(key, value)?,
+        Command::Get(GetAndRemoveArgs { key }) => match kvs_client.get(key)? {
+            Some(response) => println!("{}", response),
+            None => println!("Key not found"),
+        },
+        Command::Rm(GetAndRemoveArgs { key }) => kvs_client.rm(key)?,
+    };
 
     Ok(())
 }
