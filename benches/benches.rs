@@ -1,13 +1,25 @@
 use criterion::Criterion;
 use criterion::{criterion_group, criterion_main};
 use crossbeam_utils::sync::WaitGroup;
-use kvs::thread_pool::{SharedQueueThreadPool, ThreadPool};
+use kvs::thread_pool::{RayonThreadPool, SharedQueueThreadPool, ThreadPool};
 use kvs::{KvStore, KvsClient, KvsEngine, KvsServer, SledKvsEngine};
 use rand::Rng;
 use slog::{Discard, Logger, o};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 use tempfile::TempDir;
+
+// Each benchmark input starts its own server, so each one needs a free port.
+static PORT: AtomicUsize = AtomicUsize::new(5000);
+
+fn thread_counts() -> Vec<usize> {
+    let max_threads = 2 * num_cpus::get();
+    let mut inputs = vec![1];
+    inputs.extend((2..=max_threads).step_by(2));
+    inputs
+}
 
 fn kvs_write(c: &mut Criterion) {
     let temp_dir = TempDir::new().unwrap();
@@ -124,54 +136,350 @@ fn sled_read(c: &mut Criterion) {
 }
 
 fn write_queued_kvstore(c: &mut Criterion) {
-    let max_threads = 2 * num_cpus::get();
-    let inputs: Vec<usize> = (1..=max_threads).step_by(2).collect();
-
     c.bench_function_over_inputs(
         "write_queued_kvstore",
         |b, &num_threads| {
             // --- setup: not measured ---
             let temp_dir = TempDir::new().unwrap();
             let engine = KvStore::open(temp_dir.path()).unwrap();
-            static PORT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(5000);
-            let port = PORT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let port = PORT.fetch_add(1, Ordering::Relaxed);
             let addr = format!("127.0.0.1:{}", port);
             let server_pool = SharedQueueThreadPool::new(num_threads as u32).unwrap();
             let logger = Logger::root(Discard, o!());
             let server = KvsServer::new(addr.clone(), engine, logger, server_pool);
 
-            thread::spawn(move || server.request_loop().unwrap());
+            let shutdown_handle = server.shutdown_handle();
+
+            let server_thread = thread::spawn(move || server.request_loop().unwrap());
             thread::sleep(Duration::from_millis(100)); // let it bind
 
             let keys: Vec<String> = (0..1000).map(|i| format!("key{:08}", i)).collect();
             let client_pool = SharedQueueThreadPool::new(1000).unwrap();
+            let errors = Arc::new(AtomicUsize::new(0));
+            // --- measured ---
+            b.iter(|| {
+                let wg = WaitGroup::new();
+                for key in &keys {
+                    let wg = wg.clone();
+                    let errors = Arc::clone(&errors);
+                    let key = key.clone();
+                    let addr = addr.clone();
+                    client_pool.spawn(move || {
+                        let client = KvsClient::new(addr);
+                        if let Err(e) = client.set(key, "value".to_string()) {
+                            // Print only the first error, not one line per failed request.
+                            if errors.fetch_add(1, Ordering::Relaxed) == 0 {
+                                eprintln!("set failed: {}", e);
+                            }
+                        }
+                        drop(wg);
+                    });
+                }
+                wg.wait();
+                let failed = errors.load(Ordering::Relaxed);
+                assert_eq!(failed, 0, "{} of {} requests failed", failed, keys.len());
+            });
+
+            shutdown_handle.shutdown_server().unwrap();
+            server_thread.join().unwrap();
+        },
+        thread_counts(),
+    );
+}
+
+fn read_queued_kvstore(c: &mut Criterion) {
+    c.bench_function_over_inputs(
+        "read_queued_kvstore",
+        |b, &num_threads| {
+            let temp_dir = TempDir::new().unwrap();
+            let engine = KvStore::open(temp_dir.path()).unwrap();
+            let port = PORT.fetch_add(1, Ordering::Relaxed);
+            let addr = format!("127.0.0.1:{}", port);
+            let server_pool = SharedQueueThreadPool::new(num_threads as u32).unwrap();
+            let logger = Logger::root(Discard, o!());
+            let server = KvsServer::new(addr.clone(), engine, logger, server_pool);
+
+            let shutdown_handle = server.shutdown_handle();
+
+            let server_thread = thread::spawn(move || server.request_loop().unwrap());
+            thread::sleep(Duration::from_millis(100));
+
+            let keys: Vec<String> = (0..1000).map(|i| format!("key{:08}", i)).collect();
+            let client_pool = SharedQueueThreadPool::new(1000).unwrap();
+            let errors = Arc::new(AtomicUsize::new(0));
+
+            let setup_client = KvsClient::new(addr.clone());
+            for key in &keys {
+                setup_client.set(key.clone(), "value".to_string()).unwrap();
+            }
 
             // --- measured ---
             b.iter(|| {
                 let wg = WaitGroup::new();
                 for key in &keys {
                     let wg = wg.clone();
+                    let errors = Arc::clone(&errors);
                     let key = key.clone();
                     let addr = addr.clone();
                     client_pool.spawn(move || {
                         let client = KvsClient::new(addr);
-                        assert!(client.set(key, "value".to_string()).is_ok());
+                        match client.get(key) {
+                            Ok(Some(ref value)) if value == "value" => {}
+                            other => {
+                                if errors.fetch_add(1, Ordering::Relaxed) == 0 {
+                                    eprintln!("get failed: {:?}", other);
+                                }
+                            }
+                        }
                         drop(wg);
                     });
                 }
                 wg.wait();
+                let failed = errors.load(Ordering::Relaxed);
+                assert_eq!(failed, 0, "{} of {} requests failed", failed, keys.len());
             });
+
+            shutdown_handle.shutdown_server().unwrap();
+            server_thread.join().unwrap();
         },
-        inputs,
+        thread_counts(),
     );
 }
 
-criterion_group!(
-    benches,
-    kvs_write,
-    sled_write,
-    kvs_read,
-    sled_read,
-    write_queued_kvstore
-);
-criterion_main!(benches);
+fn write_rayon_kvstore(c: &mut Criterion) {
+    c.bench_function_over_inputs(
+        "write_rayon_kvstore",
+        |b, &num_threads| {
+            let temp_dir = TempDir::new().unwrap();
+            let engine = KvStore::open(temp_dir.path()).unwrap();
+            let port = PORT.fetch_add(1, Ordering::Relaxed);
+            let addr = format!("127.0.0.1:{}", port);
+            let server_pool = RayonThreadPool::new(num_threads as u32).unwrap();
+            let logger = Logger::root(Discard, o!());
+            let server = KvsServer::new(addr.clone(), engine, logger, server_pool);
+
+            let shutdown_handle = server.shutdown_handle();
+
+            let server_thread = thread::spawn(move || server.request_loop().unwrap());
+            thread::sleep(Duration::from_millis(100));
+
+            let keys: Vec<String> = (0..1000).map(|i| format!("key{:08}", i)).collect();
+            let client_pool = SharedQueueThreadPool::new(1000).unwrap();
+            let errors = Arc::new(AtomicUsize::new(0));
+
+            // --- measured ---
+            b.iter(|| {
+                let wg = WaitGroup::new();
+                for key in &keys {
+                    let wg = wg.clone();
+                    let errors = Arc::clone(&errors);
+                    let key = key.clone();
+                    let addr = addr.clone();
+                    client_pool.spawn(move || {
+                        let client = KvsClient::new(addr);
+                        if let Err(e) = client.set(key, "value".to_string()) {
+                            // Print only the first error, not one line per failed request.
+                            if errors.fetch_add(1, Ordering::Relaxed) == 0 {
+                                eprintln!("set failed: {}", e);
+                            }
+                        }
+                        drop(wg);
+                    });
+                }
+                wg.wait();
+                let failed = errors.load(Ordering::Relaxed);
+                assert_eq!(failed, 0, "{} of {} requests failed", failed, keys.len());
+            });
+
+            shutdown_handle.shutdown_server().unwrap();
+            server_thread.join().unwrap();
+        },
+        thread_counts(),
+    );
+}
+
+fn read_rayon_kvstore(c: &mut Criterion) {
+    c.bench_function_over_inputs(
+        "read_rayon_kvstore",
+        |b, &num_threads| {
+            let temp_dir = TempDir::new().unwrap();
+            let engine = KvStore::open(temp_dir.path()).unwrap();
+            let port = PORT.fetch_add(1, Ordering::Relaxed);
+            let addr = format!("127.0.0.1:{}", port);
+            let server_pool = RayonThreadPool::new(num_threads as u32).unwrap();
+            let logger = Logger::root(Discard, o!());
+            let server = KvsServer::new(addr.clone(), engine, logger, server_pool);
+
+            let shutdown_handle = server.shutdown_handle();
+
+            let server_thread = thread::spawn(move || server.request_loop().unwrap());
+            thread::sleep(Duration::from_millis(100));
+
+            let keys: Vec<String> = (0..1000).map(|i| format!("key{:08}", i)).collect();
+            let client_pool = SharedQueueThreadPool::new(1000).unwrap();
+            let errors = Arc::new(AtomicUsize::new(0));
+
+            let setup_client = KvsClient::new(addr.clone());
+            for key in &keys {
+                setup_client.set(key.clone(), "value".to_string()).unwrap();
+            }
+
+            // --- measured ---
+            b.iter(|| {
+                let wg = WaitGroup::new();
+                for key in &keys {
+                    let wg = wg.clone();
+                    let errors = Arc::clone(&errors);
+                    let key = key.clone();
+                    let addr = addr.clone();
+                    client_pool.spawn(move || {
+                        let client = KvsClient::new(addr);
+                        match client.get(key) {
+                            Ok(Some(ref value)) if value == "value" => {}
+                            other => {
+                                if errors.fetch_add(1, Ordering::Relaxed) == 0 {
+                                    eprintln!("get failed: {:?}", other);
+                                }
+                            }
+                        }
+                        drop(wg);
+                    });
+                }
+                wg.wait();
+                let failed = errors.load(Ordering::Relaxed);
+                assert_eq!(failed, 0, "{} of {} requests failed", failed, keys.len());
+            });
+
+            shutdown_handle.shutdown_server().unwrap();
+            server_thread.join().unwrap();
+        },
+        thread_counts(),
+    );
+}
+
+fn write_rayon_sledkvengine(c: &mut Criterion) {
+    c.bench_function_over_inputs(
+        "write_rayon_sledkvengine",
+        |b, &num_threads| {
+            let temp_dir = TempDir::new().unwrap();
+            let engine = SledKvsEngine::open(temp_dir.path()).unwrap();
+            let port = PORT.fetch_add(1, Ordering::Relaxed);
+            let addr = format!("127.0.0.1:{}", port);
+            let server_pool = RayonThreadPool::new(num_threads as u32).unwrap();
+            let logger = Logger::root(Discard, o!());
+            let server = KvsServer::new(addr.clone(), engine, logger, server_pool);
+
+            let shutdown_handle = server.shutdown_handle();
+
+            let server_thread = thread::spawn(move || server.request_loop().unwrap());
+            thread::sleep(Duration::from_millis(100));
+
+            let keys: Vec<String> = (0..1000).map(|i| format!("key{:08}", i)).collect();
+            let client_pool = SharedQueueThreadPool::new(1000).unwrap();
+            let errors = Arc::new(AtomicUsize::new(0));
+
+            // --- measured ---
+            b.iter(|| {
+                let wg = WaitGroup::new();
+                for key in &keys {
+                    let wg = wg.clone();
+                    let errors = Arc::clone(&errors);
+                    let key = key.clone();
+                    let addr = addr.clone();
+                    client_pool.spawn(move || {
+                        let client = KvsClient::new(addr);
+                        if let Err(e) = client.set(key, "value".to_string()) {
+                            // Print only the first error, not one line per failed request.
+                            if errors.fetch_add(1, Ordering::Relaxed) == 0 {
+                                eprintln!("set failed: {}", e);
+                            }
+                        }
+                        drop(wg);
+                    });
+                }
+                wg.wait();
+                let failed = errors.load(Ordering::Relaxed);
+                assert_eq!(failed, 0, "{} of {} requests failed", failed, keys.len());
+            });
+
+            shutdown_handle.shutdown_server().unwrap();
+            server_thread.join().unwrap();
+        },
+        thread_counts(),
+    );
+}
+
+fn read_rayon_sledkvengine(c: &mut Criterion) {
+    c.bench_function_over_inputs(
+        "read_rayon_sledkvengine",
+        |b, &num_threads| {
+            let temp_dir = TempDir::new().unwrap();
+            let engine = SledKvsEngine::open(temp_dir.path()).unwrap();
+            let port = PORT.fetch_add(1, Ordering::Relaxed);
+            let addr = format!("127.0.0.1:{}", port);
+            let server_pool = RayonThreadPool::new(num_threads as u32).unwrap();
+            let logger = Logger::root(Discard, o!());
+            let server = KvsServer::new(addr.clone(), engine, logger, server_pool);
+
+            let shutdown_handle = server.shutdown_handle();
+
+            let server_thread = thread::spawn(move || server.request_loop().unwrap());
+            thread::sleep(Duration::from_millis(100));
+
+            let keys: Vec<String> = (0..1000).map(|i| format!("key{:08}", i)).collect();
+            let client_pool = SharedQueueThreadPool::new(1000).unwrap();
+            let errors = Arc::new(AtomicUsize::new(0));
+
+            let setup_client = KvsClient::new(addr.clone());
+            for key in &keys {
+                setup_client.set(key.clone(), "value".to_string()).unwrap();
+            }
+
+            // --- measured ---
+            b.iter(|| {
+                let wg = WaitGroup::new();
+                for key in &keys {
+                    let wg = wg.clone();
+                    let errors = Arc::clone(&errors);
+                    let key = key.clone();
+                    let addr = addr.clone();
+                    client_pool.spawn(move || {
+                        let client = KvsClient::new(addr);
+                        match client.get(key) {
+                            Ok(Some(ref value)) if value == "value" => {}
+                            other => {
+                                if errors.fetch_add(1, Ordering::Relaxed) == 0 {
+                                    eprintln!("get failed: {:?}", other);
+                                }
+                            }
+                        }
+                        drop(wg);
+                    });
+                }
+                wg.wait();
+                let failed = errors.load(Ordering::Relaxed);
+                assert_eq!(failed, 0, "{} of {} requests failed", failed, keys.len());
+            });
+
+            shutdown_handle.shutdown_server().unwrap();
+            server_thread.join().unwrap();
+        },
+        thread_counts(),
+    );
+}
+
+criterion_group!(benches, kvs_write, sled_write, kvs_read, sled_read);
+
+criterion_group! {
+    name = server_benches;
+    config = Criterion::default().sample_size(5);
+    targets =
+        write_queued_kvstore,
+        read_queued_kvstore,
+        write_rayon_kvstore,
+        read_rayon_kvstore,
+        write_rayon_sledkvengine,
+        read_rayon_sledkvengine
+}
+
+criterion_main!(benches, server_benches);

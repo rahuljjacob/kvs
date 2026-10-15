@@ -2,13 +2,23 @@ use crate::shared::Response;
 pub use crate::shared::{CommandSerialized, Get, Result, Rm, Set};
 use crate::thread_pool::ThreadPool;
 use slog::{Logger, error};
-use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::Ordering;
+use std::{
+    net::{TcpListener, TcpStream},
+    sync::{Arc, atomic::AtomicBool},
+};
 
 pub struct KvsServer<E: KvsEngine, P: ThreadPool> {
     pub addr: String,
     pub engine: E,
     pub logger: Logger,
     pub thread_pool: P,
+    pub shutdown: Arc<AtomicBool>,
+}
+
+pub struct ShutdownHandle {
+    pub addr: String,
+    pub shutdown: Arc<AtomicBool>,
 }
 
 pub trait KvsEngine: Clone + Send + 'static {
@@ -26,6 +36,7 @@ impl<E: KvsEngine, P: ThreadPool> KvsServer<E, P> {
             engine,
             logger,
             thread_pool,
+            shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -33,6 +44,9 @@ impl<E: KvsEngine, P: ThreadPool> KvsServer<E, P> {
         let listener = TcpListener::bind(&self.addr)?;
 
         for stream in listener.incoming() {
+            if self.shutdown.load(Ordering::Acquire) {
+                break;
+            }
             match stream {
                 Ok(connection) => {
                     let engine = self.engine.clone();
@@ -47,6 +61,21 @@ impl<E: KvsEngine, P: ThreadPool> KvsServer<E, P> {
             }
         }
 
+        Ok(())
+    }
+
+    pub fn shutdown_handle(&self) -> ShutdownHandle {
+        ShutdownHandle {
+            addr: self.addr.clone(),
+            shutdown: self.shutdown.clone(),
+        }
+    }
+}
+
+impl ShutdownHandle {
+    pub fn shutdown_server(self) -> Result<()> {
+        self.shutdown.store(true, Ordering::Release);
+        let _connection = TcpStream::connect(&self.addr)?;
         Ok(())
     }
 }
