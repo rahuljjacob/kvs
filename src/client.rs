@@ -1,6 +1,9 @@
 use crate::shared::{CommandSerialized, Get, Response, Result, Rm, Set};
 use failure::err_msg;
-use std::net::TcpStream;
+use std::{
+    io::{BufReader, BufWriter, Write},
+    net::TcpStream,
+};
 
 pub struct KvsClient {
     addr: String,
@@ -44,9 +47,13 @@ impl KvsClient {
     fn request(&self, command: CommandSerialized) -> Result<Response> {
         let connection = TcpStream::connect(&self.addr)?;
 
-        serde_json::to_writer(&connection, &command)?;
+        let mut writer = BufWriter::new(&connection);
+        let mut reader = BufReader::new(&connection);
 
-        let message: Response = serde_json::Deserializer::from_reader(&connection)
+        serde_json::to_writer(&mut writer, &command)?;
+        writer.flush()?;
+
+        let message: Response = serde_json::Deserializer::from_reader(&mut reader)
             .into_iter::<Response>()
             .next()
             .unwrap()?;

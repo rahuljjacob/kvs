@@ -2,6 +2,7 @@ use crate::shared::Response;
 pub use crate::shared::{CommandSerialized, Get, Result, Rm, Set};
 use crate::thread_pool::ThreadPool;
 use slog::{Logger, error};
+use std::io::{BufReader, BufWriter, Write};
 use std::sync::atomic::Ordering;
 use std::{
     net::{TcpListener, TcpStream},
@@ -81,10 +82,13 @@ impl ShutdownHandle {
 }
 
 fn handle_request<E: KvsEngine>(engine: E, connection: TcpStream) -> Result<()> {
-    let command: CommandSerialized = serde_json::Deserializer::from_reader(&connection)
+    let reader = BufReader::new(&connection);
+    let command: CommandSerialized = serde_json::Deserializer::from_reader(reader)
         .into_iter::<CommandSerialized>()
         .next()
         .unwrap()?;
+
+    let mut writer = BufWriter::new(&connection);
 
     match command {
         CommandSerialized::Get(Get { key }) => {
@@ -94,18 +98,18 @@ fn handle_request<E: KvsEngine>(engine: E, connection: TcpStream) -> Result<()> 
                     match val {
                         Some(value) => {
                             serde_json::to_writer(
-                                &connection,
+                                &mut writer,
                                 &Response::GetResp(Ok(Some(value))),
                             )?;
                         }
                         None => {
                             // Send Key not found : String
-                            serde_json::to_writer(&connection, &Response::GetResp(Ok(None)))?;
+                            serde_json::to_writer(&mut writer, &Response::GetResp(Ok(None)))?;
                         }
                     }
                 }
                 Err(e) => {
-                    serde_json::to_writer(&connection, &Response::GetResp(Err(e.to_string())))?;
+                    serde_json::to_writer(&mut writer, &Response::GetResp(Err(e.to_string())))?;
                 }
             }
         }
@@ -114,10 +118,10 @@ fn handle_request<E: KvsEngine>(engine: E, connection: TcpStream) -> Result<()> 
             match res {
                 Ok(()) => {
                     let response = Response::SetResp(Ok(()));
-                    serde_json::to_writer(&connection, &response)?;
+                    serde_json::to_writer(&mut writer, &response)?;
                 }
                 Err(e) => {
-                    serde_json::to_writer(&connection, &Response::SetResp(Err(e.to_string())))?;
+                    serde_json::to_writer(&mut writer, &Response::SetResp(Err(e.to_string())))?;
                 }
             }
         }
@@ -126,14 +130,15 @@ fn handle_request<E: KvsEngine>(engine: E, connection: TcpStream) -> Result<()> 
             match res {
                 Ok(()) => {
                     let response = Response::RmResp(Ok(()));
-                    serde_json::to_writer(&connection, &response)?;
+                    serde_json::to_writer(&mut writer, &response)?;
                 }
                 Err(e) => {
-                    serde_json::to_writer(&connection, &Response::RmResp(Err(e.to_string())))?;
+                    serde_json::to_writer(&mut writer, &Response::RmResp(Err(e.to_string())))?;
                 }
             }
         }
     };
 
+    writer.flush()?;
     Ok(())
 }

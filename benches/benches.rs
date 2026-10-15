@@ -11,7 +11,7 @@ use std::thread;
 use std::time::Duration;
 use tempfile::TempDir;
 
-// Each benchmark input starts its own server, so each one needs a free port.
+// Common PORT
 static PORT: AtomicUsize = AtomicUsize::new(5000);
 
 fn thread_counts() -> Vec<usize> {
@@ -22,24 +22,30 @@ fn thread_counts() -> Vec<usize> {
 }
 
 fn kvs_write(c: &mut Criterion) {
-    let temp_dir = TempDir::new().unwrap();
-    let mut kv_store = KvStore::open(temp_dir.path()).unwrap();
-
-    let mut rng = rand::thread_rng();
-
-    let key_value_map: Vec<(String, String)> = (0..100)
-        .map(|_| {
-            let key_length = rng.gen_range(1, 100000);
-            let val_length = rng.gen_range(1, 100000);
-            let key: String = (0..key_length).map(|_| rng.r#gen::<char>()).collect();
-            let val: String = (0..val_length).map(|_| rng.r#gen::<char>()).collect();
-            (key, val)
-        })
-        .collect();
+    let mut state = None;
 
     c.bench_function("kvs_write", move |b| {
+        let (_temp_dir, kv_store, key_value_map) = state.get_or_insert_with(|| {
+            let temp_dir = TempDir::new().unwrap();
+            let kv_store = KvStore::open(temp_dir.path()).unwrap();
+
+            let mut rng = rand::thread_rng();
+
+            let key_value_map: Vec<(String, String)> = (0..100)
+                .map(|_| {
+                    let key_length = rng.gen_range(1, 100000);
+                    let val_length = rng.gen_range(1, 100000);
+                    let key: String = (0..key_length).map(|_| rng.r#gen::<char>()).collect();
+                    let val: String = (0..val_length).map(|_| rng.r#gen::<char>()).collect();
+                    (key, val)
+                })
+                .collect();
+
+            (temp_dir, kv_store, key_value_map)
+        });
+
         b.iter(|| {
-            for (key, value) in &key_value_map {
+            for (key, value) in key_value_map.iter() {
                 assert!(kv_store.set(key.clone(), value.clone()).is_ok());
             }
         });
@@ -47,24 +53,30 @@ fn kvs_write(c: &mut Criterion) {
 }
 
 fn sled_write(c: &mut Criterion) {
-    let temp_dir = TempDir::new().unwrap();
-    let mut kv_store = SledKvsEngine::open(temp_dir.path()).unwrap();
-
-    let mut rng = rand::thread_rng();
-
-    let key_values: Vec<(String, String)> = (0..100)
-        .map(|_| {
-            let key_length = rng.gen_range(1, 100000);
-            let val_length = rng.gen_range(1, 100000);
-            let key: String = (0..key_length).map(|_| rng.r#gen::<char>()).collect();
-            let val: String = (0..val_length).map(|_| rng.r#gen::<char>()).collect();
-            (key, val)
-        })
-        .collect();
+    let mut state = None;
 
     c.bench_function("sled_write", move |b| {
+        let (_temp_dir, kv_store, key_values) = state.get_or_insert_with(|| {
+            let temp_dir = TempDir::new().unwrap();
+            let kv_store = SledKvsEngine::open(temp_dir.path()).unwrap();
+
+            let mut rng = rand::thread_rng();
+
+            let key_values: Vec<(String, String)> = (0..100)
+                .map(|_| {
+                    let key_length = rng.gen_range(1, 100000);
+                    let val_length = rng.gen_range(1, 100000);
+                    let key: String = (0..key_length).map(|_| rng.r#gen::<char>()).collect();
+                    let val: String = (0..val_length).map(|_| rng.r#gen::<char>()).collect();
+                    (key, val)
+                })
+                .collect();
+
+            (temp_dir, kv_store, key_values)
+        });
+
         b.iter(|| {
-            for (key, value) in &key_values {
+            for (key, value) in key_values.iter() {
                 assert!(kv_store.set(key.clone(), value.clone()).is_ok());
             }
         });
@@ -72,31 +84,37 @@ fn sled_write(c: &mut Criterion) {
 }
 
 fn kvs_read(c: &mut Criterion) {
-    let temp_dir = TempDir::new().unwrap();
-    let mut kv_store = KvStore::open(temp_dir.path()).unwrap();
-
-    let mut rng = rand::thread_rng();
-
-    let keys: Vec<String> = (0..1000)
-        .map(|_| {
-            let key_length = rng.gen_range(1, 100000);
-            let val_length = rng.gen_range(1, 100000);
-            let key: String = (0..key_length).map(|_| rng.r#gen::<char>()).collect();
-            let val: String = (0..val_length).map(|_| rng.r#gen::<char>()).collect();
-
-            kv_store.set(key.clone(), val).unwrap();
-
-            key
-        })
-        .collect();
-
-    let key_accesses: Vec<String> = (0..1000)
-        .map(|_| keys[rng.gen_range(0, 1000)].clone())
-        .collect();
+    let mut state = None;
 
     c.bench_function("kvs_read", move |b| {
+        let (_temp_dir, kv_store, key_accesses) = state.get_or_insert_with(|| {
+            let temp_dir = TempDir::new().unwrap();
+            let kv_store = KvStore::open(temp_dir.path()).unwrap();
+
+            let mut rng = rand::thread_rng();
+
+            let keys: Vec<String> = (0..1000)
+                .map(|_| {
+                    let key_length = rng.gen_range(1, 100000);
+                    let val_length = rng.gen_range(1, 100000);
+                    let key: String = (0..key_length).map(|_| rng.r#gen::<char>()).collect();
+                    let val: String = (0..val_length).map(|_| rng.r#gen::<char>()).collect();
+
+                    kv_store.set(key.clone(), val).unwrap();
+
+                    key
+                })
+                .collect();
+
+            let key_accesses: Vec<String> = (0..1000)
+                .map(|_| keys[rng.gen_range(0, 1000)].clone())
+                .collect();
+
+            (temp_dir, kv_store, key_accesses)
+        });
+
         b.iter(|| {
-            for key in &key_accesses {
+            for key in key_accesses.iter() {
                 assert!(kv_store.get(key.clone()).unwrap().is_some());
             }
         });
@@ -104,31 +122,37 @@ fn kvs_read(c: &mut Criterion) {
 }
 
 fn sled_read(c: &mut Criterion) {
-    let temp_dir = TempDir::new().unwrap();
-    let mut sled_store = SledKvsEngine::open(temp_dir.path()).unwrap();
-
-    let mut rng = rand::thread_rng();
-
-    let keys: Vec<String> = (0..1000)
-        .map(|_| {
-            let key_length = rng.gen_range(1, 100000);
-            let val_length = rng.gen_range(1, 100000);
-            let key: String = (0..key_length).map(|_| rng.r#gen::<char>()).collect();
-            let val: String = (0..val_length).map(|_| rng.r#gen::<char>()).collect();
-
-            sled_store.set(key.clone(), val).unwrap();
-
-            key
-        })
-        .collect();
-
-    let key_accesses: Vec<String> = (0..1000)
-        .map(|_| keys[rng.gen_range(0, 1000)].clone())
-        .collect();
+    let mut state = None;
 
     c.bench_function("sled_read", move |b| {
+        let (_temp_dir, sled_store, key_accesses) = state.get_or_insert_with(|| {
+            let temp_dir = TempDir::new().unwrap();
+            let sled_store = SledKvsEngine::open(temp_dir.path()).unwrap();
+
+            let mut rng = rand::thread_rng();
+
+            let keys: Vec<String> = (0..1000)
+                .map(|_| {
+                    let key_length = rng.gen_range(1, 100000);
+                    let val_length = rng.gen_range(1, 100000);
+                    let key: String = (0..key_length).map(|_| rng.r#gen::<char>()).collect();
+                    let val: String = (0..val_length).map(|_| rng.r#gen::<char>()).collect();
+
+                    sled_store.set(key.clone(), val).unwrap();
+
+                    key
+                })
+                .collect();
+
+            let key_accesses: Vec<String> = (0..1000)
+                .map(|_| keys[rng.gen_range(0, 1000)].clone())
+                .collect();
+
+            (temp_dir, sled_store, key_accesses)
+        });
+
         b.iter(|| {
-            for key in &key_accesses {
+            for key in key_accesses.iter() {
                 assert!(sled_store.get(key.clone()).unwrap().is_some());
             }
         });
@@ -151,7 +175,7 @@ fn write_queued_kvstore(c: &mut Criterion) {
             let shutdown_handle = server.shutdown_handle();
 
             let server_thread = thread::spawn(move || server.request_loop().unwrap());
-            thread::sleep(Duration::from_millis(100)); // let it bind
+            thread::sleep(Duration::from_millis(100));
 
             let keys: Vec<String> = (0..1000).map(|i| format!("key{:08}", i)).collect();
             let client_pool = SharedQueueThreadPool::new(1000).unwrap();
@@ -167,7 +191,6 @@ fn write_queued_kvstore(c: &mut Criterion) {
                     client_pool.spawn(move || {
                         let client = KvsClient::new(addr);
                         if let Err(e) = client.set(key, "value".to_string()) {
-                            // Print only the first error, not one line per failed request.
                             if errors.fetch_add(1, Ordering::Relaxed) == 0 {
                                 eprintln!("set failed: {}", e);
                             }
@@ -213,7 +236,6 @@ fn read_queued_kvstore(c: &mut Criterion) {
                 setup_client.set(key.clone(), "value".to_string()).unwrap();
             }
 
-            // --- measured ---
             b.iter(|| {
                 let wg = WaitGroup::new();
                 for key in &keys {
@@ -267,7 +289,6 @@ fn write_rayon_kvstore(c: &mut Criterion) {
             let client_pool = SharedQueueThreadPool::new(1000).unwrap();
             let errors = Arc::new(AtomicUsize::new(0));
 
-            // --- measured ---
             b.iter(|| {
                 let wg = WaitGroup::new();
                 for key in &keys {
@@ -278,7 +299,6 @@ fn write_rayon_kvstore(c: &mut Criterion) {
                     client_pool.spawn(move || {
                         let client = KvsClient::new(addr);
                         if let Err(e) = client.set(key, "value".to_string()) {
-                            // Print only the first error, not one line per failed request.
                             if errors.fetch_add(1, Ordering::Relaxed) == 0 {
                                 eprintln!("set failed: {}", e);
                             }
@@ -324,7 +344,6 @@ fn read_rayon_kvstore(c: &mut Criterion) {
                 setup_client.set(key.clone(), "value".to_string()).unwrap();
             }
 
-            // --- measured ---
             b.iter(|| {
                 let wg = WaitGroup::new();
                 for key in &keys {
@@ -378,7 +397,6 @@ fn write_rayon_sledkvengine(c: &mut Criterion) {
             let client_pool = SharedQueueThreadPool::new(1000).unwrap();
             let errors = Arc::new(AtomicUsize::new(0));
 
-            // --- measured ---
             b.iter(|| {
                 let wg = WaitGroup::new();
                 for key in &keys {
@@ -389,7 +407,6 @@ fn write_rayon_sledkvengine(c: &mut Criterion) {
                     client_pool.spawn(move || {
                         let client = KvsClient::new(addr);
                         if let Err(e) = client.set(key, "value".to_string()) {
-                            // Print only the first error, not one line per failed request.
                             if errors.fetch_add(1, Ordering::Relaxed) == 0 {
                                 eprintln!("set failed: {}", e);
                             }
@@ -435,7 +452,6 @@ fn read_rayon_sledkvengine(c: &mut Criterion) {
                 setup_client.set(key.clone(), "value".to_string()).unwrap();
             }
 
-            // --- measured ---
             b.iter(|| {
                 let wg = WaitGroup::new();
                 for key in &keys {
