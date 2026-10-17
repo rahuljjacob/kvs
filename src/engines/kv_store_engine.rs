@@ -26,6 +26,7 @@ pub struct KvStore {
 
 pub struct BufWriterWithPos {
     writer_fd: File,
+    //Offset to end of file
     offset: u64,
 }
 
@@ -181,8 +182,12 @@ impl KvStore {
         let mut pos = 0;
 
         while let Some(command) = kv_stream.next() {
+            let command = match command {
+                Ok(command) => command,
+                Err(e) if e.is_eof() => break,
+                Err(e) => return Err(e.into()),
+            };
             let end_pos = kv_stream.byte_offset() as u64;
-            let command = command?;
             match command {
                 WriteCommand::Set(Set { key, value: _value }) => {
                     index.insert(key, (pos, end_pos - pos));
@@ -193,6 +198,9 @@ impl KvStore {
             };
             pos = end_pos;
         }
+
+        // Truncate tail if corrupted
+        writer_file.set_len(pos)?;
 
         let kv_store = SharedKvStore {
             writer: BufWriterWithPos::new(writer_file, pos),
