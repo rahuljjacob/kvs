@@ -2,7 +2,7 @@ use crossbeam_skiplist::SkipMap;
 
 use crate::server::KvsEngine;
 pub use crate::shared::{Result, Rm, Set, WriteCommand};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::{
     fs::File,
     io::{BufReader, Seek, SeekFrom, Write},
@@ -12,7 +12,6 @@ use std::{
 const THRESHOLD: u64 = 1 * 1024 * 1024;
 
 pub struct SharedKvStore {
-    path: PathBuf,
     uncompacted: u64,
     writer: BufWriterWithPos,
 }
@@ -22,6 +21,8 @@ pub struct KvStore {
     store: Arc<Mutex<SharedKvStore>>,
     // (u64, u64) -> (Offset, Length)
     index: Arc<SkipMap<String, (u64, u64)>>,
+    compaction_lock: Arc<RwLock<()>>,
+    path: Arc<PathBuf>,
 }
 
 pub struct BufWriterWithPos {
@@ -32,8 +33,9 @@ pub struct BufWriterWithPos {
 
 impl KvsEngine for KvStore {
     fn get(&self, key: String) -> Result<Option<String>> {
-        let kv_store = self.store.lock().unwrap();
-        let mut file = File::open(&kv_store.path)?;
+        // Read lock is dropped when _guard is dropped
+        let _guard = self.compaction_lock.read().unwrap();
+        let mut file = File::open(&*self.path)?;
         let Some(offset) = self.index.get(&key) else {
             return Ok(None);
         };
@@ -71,7 +73,8 @@ impl KvsEngine for KvStore {
         self.index.insert(key, (offset, len));
 
         if kv_store.uncompacted > THRESHOLD {
-            kv_store.compact(self.index.clone())?;
+            let _guard = self.compaction_lock.write().unwrap();
+            kv_store.compact(self.index.clone(), self.path.clone())?;
         }
 
         Ok(())
@@ -94,7 +97,8 @@ impl KvsEngine for KvStore {
         self.index.remove(&key);
 
         if kv_store.uncompacted > THRESHOLD {
-            kv_store.compact(self.index.clone())?;
+            let _guard = self.compaction_lock.write().unwrap();
+            kv_store.compact(self.index.clone(), self.path.clone())?;
         }
 
         Ok(())
@@ -102,18 +106,21 @@ impl KvsEngine for KvStore {
 }
 
 impl SharedKvStore {
-    pub fn compact(&mut self, index: Arc<SkipMap<String, (u64, u64)>>) -> Result<()> {
-        let path = self.path.clone();
-        let path = path.with_file_name("db2.txt");
+    pub fn compact(
+        &mut self,
+        index: Arc<SkipMap<String, (u64, u64)>>,
+        path: Arc<PathBuf>,
+    ) -> Result<()> {
+        let new_path = path.with_file_name("db2.txt");
         let new_index: SkipMap<String, (u64, u64)> = SkipMap::new();
 
         let mut file = File::options()
             .append(true)
             .read(true)
             .create(true)
-            .open(&path)?;
+            .open(&new_path)?;
 
-        let mut reader = BufReader::new(File::open(&self.path)?);
+        let mut reader = BufReader::new(File::open(&*path)?);
 
         for entry in index.iter() {
             let key = entry.key();
@@ -140,11 +147,11 @@ impl SharedKvStore {
             new_index.insert(key.clone(), (new_offset, end_offset - new_offset));
         }
 
-        std::fs::rename(&path, &self.path)?;
+        std::fs::rename(&new_path, &*path)?;
         for (key, (offset, len)) in new_index {
             index.insert(key, (offset, len));
         }
-        self.writer.writer_fd = File::options().append(true).create(true).open(&self.path)?;
+        self.writer.writer_fd = File::options().append(true).create(true).open(&*path)?;
         self.writer.offset = file.stream_position()?;
         self.uncompacted = 0;
 
@@ -204,13 +211,14 @@ impl KvStore {
 
         let kv_store = SharedKvStore {
             writer: BufWriterWithPos::new(writer_file, pos),
-            path: path,
             uncompacted: 0,
         };
 
         Ok(KvStore {
             index: Arc::new(index),
             store: Arc::new(Mutex::new(kv_store)),
+            compaction_lock: Arc::new(RwLock::new(())),
+            path: Arc::new(path),
         })
     }
 }
