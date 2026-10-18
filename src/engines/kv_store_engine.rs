@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::{
     fs::File,
     io::{BufReader, Seek, SeekFrom, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 const THRESHOLD: u64 = 1 * 1024 * 1024;
@@ -14,13 +14,13 @@ const THRESHOLD: u64 = 1 * 1024 * 1024;
 pub struct SharedKvStore {
     uncompacted: u64,
     writer: BufWriterWithPos,
+    current_generation: u64,
 }
 
 #[derive(Clone)]
 pub struct KvStore {
     store: Arc<Mutex<SharedKvStore>>,
-    // (u64, u64) -> (Offset, Length)
-    index: Arc<SkipMap<String, (u64, u64)>>,
+    index: Arc<SkipMap<String, CommandPos>>,
     compaction_lock: Arc<RwLock<()>>,
     path: Arc<PathBuf>,
 }
@@ -31,16 +31,23 @@ pub struct BufWriterWithPos {
     offset: u64,
 }
 
+#[derive(Clone)]
+pub struct CommandPos {
+    offset: u64,
+    len: u64,
+    generation: u64,
+}
+
 impl KvsEngine for KvStore {
     fn get(&self, key: String) -> Result<Option<String>> {
         // Read lock is dropped when _guard is dropped
         let _guard = self.compaction_lock.read().unwrap();
-        let mut file = File::open(&*self.path)?;
-        let Some(offset) = self.index.get(&key) else {
+        let Some(command) = self.index.get(&key) else {
             return Ok(None);
         };
 
-        file.seek(SeekFrom::Start(offset.value().0))?;
+        let mut file = File::open(log_path(&self.path, command.value().generation))?;
+        file.seek(SeekFrom::Start(command.value().offset))?;
         let reader = BufReader::new(file);
         let mut kv_stream =
             serde_json::Deserializer::from_reader(reader).into_iter::<WriteCommand>();
@@ -68,9 +75,16 @@ impl KvsEngine for KvStore {
         kv_store.writer.offset = offset + len;
 
         if let Some(old_value) = self.index.get(&key) {
-            kv_store.uncompacted = kv_store.uncompacted + old_value.value().1;
+            kv_store.uncompacted = kv_store.uncompacted + old_value.value().len;
         }
-        self.index.insert(key, (offset, len));
+        self.index.insert(
+            key,
+            CommandPos {
+                offset,
+                len,
+                generation: kv_store.current_generation,
+            },
+        );
 
         if kv_store.uncompacted > THRESHOLD {
             let _guard = self.compaction_lock.write().unwrap();
@@ -84,7 +98,7 @@ impl KvsEngine for KvStore {
     fn remove(&self, key: String) -> Result<()> {
         let mut kv_store = self.store.lock().unwrap();
         if let Some(old_value) = self.index.get(&key) {
-            kv_store.uncompacted = kv_store.uncompacted + old_value.value().1
+            kv_store.uncompacted = kv_store.uncompacted + old_value.value().len
         } else {
             return Err(failure::format_err!("Key not found"));
         }
@@ -108,11 +122,11 @@ impl KvsEngine for KvStore {
 impl SharedKvStore {
     pub fn compact(
         &mut self,
-        index: Arc<SkipMap<String, (u64, u64)>>,
+        index: Arc<SkipMap<String, CommandPos>>,
         path: Arc<PathBuf>,
     ) -> Result<()> {
-        let new_path = path.with_file_name("db2.txt");
-        let new_index: SkipMap<String, (u64, u64)> = SkipMap::new();
+        let new_path = path.join("compact.tmp");
+        let new_index = SkipMap::new();
 
         let mut file = File::options()
             .append(true)
@@ -120,12 +134,12 @@ impl SharedKvStore {
             .create(true)
             .open(&new_path)?;
 
-        let mut reader = BufReader::new(File::open(&*path)?);
+        let mut reader = BufReader::new(File::open(log_path(&path, 0))?);
 
         for entry in index.iter() {
             let key = entry.key();
-            let (offset, _) = *entry.value();
-            reader.seek(SeekFrom::Start(offset))?;
+            let command = entry.value();
+            reader.seek(SeekFrom::Start(command.offset))?;
 
             let mut kv_stream =
                 serde_json::Deserializer::from_reader(&mut reader).into_iter::<WriteCommand>();
@@ -147,11 +161,21 @@ impl SharedKvStore {
             new_index.insert(key.clone(), (new_offset, end_offset - new_offset));
         }
 
-        std::fs::rename(&new_path, &*path)?;
+        std::fs::rename(&new_path, log_path(&path, 0))?;
         for (key, (offset, len)) in new_index {
-            index.insert(key, (offset, len));
+            index.insert(
+                key,
+                CommandPos {
+                    offset,
+                    len,
+                    generation: 0,
+                },
+            );
         }
-        self.writer.writer_fd = File::options().append(true).create(true).open(&*path)?;
+        self.writer.writer_fd = File::options()
+            .append(true)
+            .create(true)
+            .open(log_path(&path, 0))?;
         self.writer.offset = file.stream_position()?;
         self.uncompacted = 0;
 
@@ -171,12 +195,11 @@ impl BufWriterWithPos {
 impl KvStore {
     pub fn open(temp_path: impl Into<PathBuf>) -> Result<KvStore> {
         let path: PathBuf = temp_path.into();
-        let path = path.join("db.txt");
         let file = File::options()
             .append(true)
             .read(true)
             .create(true)
-            .open(&path)?;
+            .open(log_path(&path, 0))?;
         let index = SkipMap::new();
 
         // Replay log into KvStore
@@ -184,7 +207,10 @@ impl KvStore {
         let mut kv_stream =
             serde_json::Deserializer::from_reader(reader).into_iter::<WriteCommand>();
 
-        let writer_file = File::options().append(true).create(true).open(&path)?;
+        let writer_file = File::options()
+            .append(true)
+            .create(true)
+            .open(log_path(&path, 0))?;
 
         let mut pos = 0;
 
@@ -197,7 +223,14 @@ impl KvStore {
             let end_pos = kv_stream.byte_offset() as u64;
             match command {
                 WriteCommand::Set(Set { key, value: _value }) => {
-                    index.insert(key, (pos, end_pos - pos));
+                    index.insert(
+                        key,
+                        CommandPos {
+                            offset: pos,
+                            len: end_pos - pos,
+                            generation: 0,
+                        },
+                    );
                 }
                 WriteCommand::Rm(Rm { key }) => {
                     index.remove(&key);
@@ -212,6 +245,7 @@ impl KvStore {
         let kv_store = SharedKvStore {
             writer: BufWriterWithPos::new(writer_file, pos),
             uncompacted: 0,
+            current_generation: 0,
         };
 
         Ok(KvStore {
@@ -221,4 +255,8 @@ impl KvStore {
             path: Arc::new(path),
         })
     }
+}
+
+fn log_path(dir: &Path, generation: u64) -> PathBuf {
+    dir.join(format!("{}.log", generation))
 }
