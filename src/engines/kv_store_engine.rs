@@ -123,6 +123,8 @@ impl KvsEngine for KvStore {
         kv_store.writer.offset = kv_store.writer.offset + len;
         self.index.remove(&key);
 
+        kv_store.fragmentation = kv_store.fragmentation + len;
+
         if kv_store.fragmentation > THRESHOLD {
             kv_store.compact(self.index.clone(), self.path.clone())?;
         }
@@ -207,7 +209,8 @@ impl BufWriterWithPos {
 impl KvStore {
     pub fn open(temp_path: impl Into<PathBuf>) -> Result<KvStore> {
         let path: PathBuf = temp_path.into();
-        let index = SkipMap::new();
+        let index: SkipMap<String, CommandPos> = SkipMap::new();
+        let mut fragmentation = 0;
 
         let generation_list = get_generations(&path)?;
 
@@ -242,6 +245,9 @@ impl KvStore {
                 let end_pos = kv_stream.byte_offset() as u64;
                 match command {
                     WriteCommand::Set(Set { key, value: _value }) => {
+                        if let Some(old_value) = index.get(&key) {
+                            fragmentation = fragmentation + old_value.value().len;
+                        }
                         index.insert(
                             key,
                             CommandPos {
@@ -252,7 +258,10 @@ impl KvStore {
                         );
                     }
                     WriteCommand::Rm(Rm { key }) => {
-                        index.remove(&key);
+                        if let Some(removed_value) = index.remove(&key) {
+                            fragmentation = fragmentation + removed_value.value().len;
+                        }
+                        fragmentation = fragmentation + end_pos - pos;
                     }
                 };
                 pos = end_pos;
@@ -261,7 +270,7 @@ impl KvStore {
 
         let kv_store = SharedKvStore {
             writer: BufWriterWithPos::new(writer_file, 0),
-            fragmentation: 0,
+            fragmentation,
             current_generation: max_generation,
         };
 
