@@ -86,7 +86,7 @@ fn handle_request<E: KvsEngine>(engine: E, connection: TcpStream) -> Result<()> 
     let command: CommandSerialized = serde_json::Deserializer::from_reader(reader)
         .into_iter::<CommandSerialized>()
         .next()
-        .unwrap()?;
+        .ok_or_else(|| failure::format_err!("connection closed before a request was received"))??;
 
     let mut writer = BufWriter::new(&connection);
 

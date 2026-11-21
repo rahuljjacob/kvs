@@ -56,7 +56,9 @@ impl KvsClient {
         let message: Response = serde_json::Deserializer::from_reader(&mut reader)
             .into_iter::<Response>()
             .next()
-            .unwrap()?;
+            .ok_or_else(|| {
+                failure::format_err!("connection closed before a response was received")
+            })??;
 
         Ok(message)
     }

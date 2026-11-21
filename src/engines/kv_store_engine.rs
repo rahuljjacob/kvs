@@ -60,7 +60,13 @@ impl KvsEngine for KvStore {
         let mut kv_stream =
             serde_json::Deserializer::from_reader(reader).into_iter::<WriteCommand>();
 
-        let value = kv_stream.next().unwrap()?;
+        let value = kv_stream.next().ok_or_else(|| {
+            failure::format_err!(
+                "value not found at offset {}, generation {}",
+                pos.offset,
+                pos.generation
+            )
+        })??;
 
         match value {
             WriteCommand::Set(set) => Ok(Some(set.value)),
@@ -148,7 +154,10 @@ impl SharedKvStore {
             let mut kv_stream =
                 serde_json::Deserializer::from_reader(&mut reader).into_iter::<WriteCommand>();
 
-            let value = match kv_stream.next().unwrap()? {
+            let value = match kv_stream
+                .next()
+                .ok_or_else(|| failure::format_err!("value not found at offset, compaction"))??
+            {
                 WriteCommand::Set(set) => set.value,
                 WriteCommand::Rm(_) => unreachable!(),
             };
