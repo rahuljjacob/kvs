@@ -5,7 +5,7 @@ use std::io::ErrorKind;
 use std::sync::{Arc, Mutex};
 use std::{
     fs::File,
-    io::{BufReader, Seek, SeekFrom, Write},
+    io::{BufReader, BufWriter, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
@@ -13,7 +13,7 @@ const THRESHOLD: u64 = 1 * 1024 * 1024;
 
 pub struct SharedKvStore {
     fragmentation: u64,
-    writer: BufWriterWithPos,
+    writer: BufWriterWithPos<File>,
     current_generation: u64,
 }
 
@@ -24,8 +24,8 @@ pub struct KvStore {
     path: Arc<PathBuf>,
 }
 
-pub struct BufWriterWithPos {
-    writer_fd: File,
+pub struct BufWriterWithPos<W: Write> {
+    writer_fd: BufWriter<W>,
     //Offset to end of file
     offset: u64,
 }
@@ -82,11 +82,11 @@ impl KvsEngine for KvStore {
             key: key.clone(),
             value,
         });
-        let serialized = serde_json::to_string(&set_op)?;
         let offset = kv_store.writer.offset;
-        kv_store.writer.writer_fd.write_all(serialized.as_bytes())?;
-        let len = serialized.len() as u64;
-        kv_store.writer.offset = offset + len;
+        serde_json::to_writer(&mut kv_store.writer, &set_op)?;
+        let len = kv_store.writer.offset - offset;
+
+        kv_store.writer.flush()?;
 
         if let Some(old_value) = self.index.get(&key) {
             kv_store.fragmentation = kv_store.fragmentation + old_value.value().len;
@@ -117,10 +117,10 @@ impl KvsEngine for KvStore {
         }
 
         let del_op = WriteCommand::Rm(Rm { key: key.clone() });
-        let serialized = serde_json::to_string(&del_op)?;
-        let len = serialized.len() as u64;
-        kv_store.writer.writer_fd.write_all(serialized.as_bytes())?;
-        kv_store.writer.offset = kv_store.writer.offset + len;
+        let offset = kv_store.writer.offset;
+        serde_json::to_writer(&mut kv_store.writer, &del_op)?;
+        kv_store.writer.flush()?;
+        let len = kv_store.writer.offset - offset;
         self.index.remove(&key);
 
         kv_store.fragmentation = kv_store.fragmentation + len;
@@ -141,10 +141,15 @@ impl SharedKvStore {
     ) -> Result<()> {
         let compacted_file_generation = self.current_generation + 1;
 
-        let mut file = File::options()
-            .append(true)
-            .create(true)
-            .open(&log_path(&path, compacted_file_generation))?;
+        let mut writer = BufWriterWithPos::new(
+            File::options()
+                .append(true)
+                .create(true)
+                .open(&log_path(&path, compacted_file_generation))?,
+            0,
+        );
+
+        let mut new_positions = Vec::new();
 
         for entry in index.iter() {
             let key = entry.key();
@@ -164,29 +169,36 @@ impl SharedKvStore {
                 WriteCommand::Rm(_) => unreachable!(),
             };
 
-            let new_offset = file.stream_position()?;
+            let offset = writer.offset;
             let set_op = WriteCommand::Set(Set {
                 key: key.clone(),
                 value,
             });
-            let serialized = serde_json::to_string(&set_op)?;
-            file.write_all(serialized.as_bytes())?;
-            let end_offset = file.stream_position()?;
+            serde_json::to_writer(&mut writer, &set_op)?;
+            let len = writer.offset - offset;
 
-            index.insert(
+            new_positions.push((
                 key.clone(),
                 CommandPos {
-                    offset: new_offset,
-                    len: end_offset - new_offset,
+                    offset,
+                    len,
                     generation: compacted_file_generation,
                 },
-            );
+            ));
         }
 
-        self.writer.writer_fd = File::options()
-            .append(true)
-            .create(true)
-            .open(log_path(&path, compacted_file_generation + 1))?;
+        writer.flush()?;
+
+        for (key, pos) in new_positions {
+            index.insert(key, pos);
+        }
+
+        self.writer.writer_fd = BufWriter::new(
+            File::options()
+                .append(true)
+                .create(true)
+                .open(log_path(&path, compacted_file_generation + 1))?,
+        );
         self.writer.offset = 0;
         self.fragmentation = 0;
         self.current_generation = compacted_file_generation + 1;
@@ -197,12 +209,24 @@ impl SharedKvStore {
     }
 }
 
-impl BufWriterWithPos {
-    pub fn new(file: File, offset: u64) -> BufWriterWithPos {
+impl<W: Write> BufWriterWithPos<W> {
+    pub fn new(file: W, offset: u64) -> BufWriterWithPos<W> {
         BufWriterWithPos {
-            writer_fd: file,
+            writer_fd: BufWriter::new(file),
             offset,
         }
+    }
+}
+
+impl<W: Write> Write for BufWriterWithPos<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.writer_fd.write(buf)?;
+        self.offset += written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer_fd.flush()
     }
 }
 
