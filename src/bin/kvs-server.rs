@@ -10,8 +10,14 @@ use std::path::Path;
 struct Argss {
     #[arg(long, default_value = "127.0.0.1:4000")]
     addr: String,
-    #[arg(long, default_value = "kvs")]
-    engine: String,
+    #[arg(long, value_enum, default_value_t = Engine::Kvs)]
+    engine: Engine,
+}
+
+#[derive(clap::ValueEnum, Clone)]
+enum Engine {
+    Kvs,
+    Sled,
 }
 
 fn main() -> Result<()> {
@@ -24,35 +30,45 @@ fn main() -> Result<()> {
 
     check_engine(&env::current_dir()?, &args.engine)?;
 
-    info!(&logger, "Starting Server"; "version" => env!("CARGO_PKG_VERSION"), "engine" => &args.engine, "address" => &args.addr);
+    info!(&logger, "Starting Server"; "version" => env!("CARGO_PKG_VERSION"), "engine" => &args.engine.as_str(), "address" => &args.addr);
 
-    if args.engine == "kvs" {
-        let engine = KvStore::open(env::current_dir()?)?;
-        let thread_pool = SharedQueueThreadPool::new(num_cpus::get() as u32)?;
-        let kv_server = KvsServer::new(args.addr, engine, logger, thread_pool);
-        kv_server.request_loop()?
-    } else if args.engine == "sled" {
-        let engine = SledKvsEngine::open(env::current_dir()?)?;
-        let thread_pool = SharedQueueThreadPool::new(num_cpus::get() as u32)?;
-        let kv_server = KvsServer::new(args.addr, engine, logger, thread_pool);
-        kv_server.request_loop()?
-    } else {
-        return Err(failure::format_err!("What engine bruh"));
+    match args.engine {
+        Engine::Kvs => {
+            let engine = KvStore::open(env::current_dir()?)?;
+            let thread_pool = SharedQueueThreadPool::new(num_cpus::get() as u32)?;
+            let kv_server = KvsServer::new(args.addr, engine, logger, thread_pool);
+            kv_server.request_loop()?
+        }
+        Engine::Sled => {
+            let engine = SledKvsEngine::open(env::current_dir()?)?;
+            let thread_pool = SharedQueueThreadPool::new(num_cpus::get() as u32)?;
+            let kv_server = KvsServer::new(args.addr, engine, logger, thread_pool);
+            kv_server.request_loop()?
+        }
     }
 
     Ok(())
 }
 
-fn check_engine(path: &Path, engine: &str) -> Result<()> {
+fn check_engine(path: &Path, engine: &Engine) -> Result<()> {
     let marker_path = path.join("engine");
     let existing = std::fs::read_to_string(&marker_path).unwrap_or_default();
     let existing = existing.trim();
 
     if existing.is_empty() {
-        std::fs::write(marker_path, engine)?;
-    } else if existing != engine {
+        std::fs::write(marker_path, engine.as_str())?;
+    } else if existing != engine.as_str() {
         return Err(failure::format_err!("Wrong engine for this directory"));
     }
 
     Ok(())
+}
+
+impl Engine {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Engine::Kvs => return "kvs",
+            Engine::Sled => return "sled",
+        }
+    }
 }
