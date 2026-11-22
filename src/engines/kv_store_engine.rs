@@ -9,10 +9,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const THRESHOLD: u64 = 1 * 1024 * 1024;
+const COMPACTION_THRESHOLD: u64 = 50;
+const THRESHOLD: u64 = 1 * 1024 * 1024; // 1 MB
 
 pub struct SharedKvStore {
     fragmentation: u64,
+    live_bytes: u64,
     writer: BufWriterWithPos<File>,
     current_generation: u64,
 }
@@ -90,7 +92,10 @@ impl KvsEngine for KvStore {
 
         if let Some(old_value) = self.index.get(&key) {
             kv_store.fragmentation = kv_store.fragmentation + old_value.value().len;
+            kv_store.live_bytes = kv_store.live_bytes - old_value.value().len;
         }
+
+        kv_store.live_bytes = kv_store.live_bytes + len;
         self.index.insert(
             key,
             CommandPos {
@@ -100,7 +105,11 @@ impl KvsEngine for KvStore {
             },
         );
 
-        if kv_store.fragmentation > THRESHOLD {
+        let total = kv_store.live_bytes + kv_store.fragmentation;
+
+        if kv_store.fragmentation * 100 / total > COMPACTION_THRESHOLD
+            && kv_store.fragmentation > THRESHOLD
+        {
             kv_store.compact(self.index.clone(), self.path.clone())?;
         }
 
@@ -111,7 +120,8 @@ impl KvsEngine for KvStore {
     fn remove(&self, key: String) -> Result<()> {
         let mut kv_store = self.store.lock().unwrap();
         if let Some(old_value) = self.index.get(&key) {
-            kv_store.fragmentation = kv_store.fragmentation + old_value.value().len
+            kv_store.fragmentation = kv_store.fragmentation + old_value.value().len;
+            kv_store.live_bytes = kv_store.live_bytes - old_value.value().len;
         } else {
             return Err(failure::format_err!("Key not found"));
         }
@@ -125,7 +135,10 @@ impl KvsEngine for KvStore {
 
         kv_store.fragmentation = kv_store.fragmentation + len;
 
-        if kv_store.fragmentation > THRESHOLD {
+        let total = kv_store.fragmentation + kv_store.live_bytes;
+        if kv_store.fragmentation * 100 / total > COMPACTION_THRESHOLD
+            && kv_store.fragmentation > THRESHOLD
+        {
             kv_store.compact(self.index.clone(), self.path.clone())?;
         }
 
@@ -235,6 +248,7 @@ impl KvStore {
         let path: PathBuf = temp_path.into();
         let index: SkipMap<String, CommandPos> = SkipMap::new();
         let mut fragmentation = 0;
+        let mut live_bytes = 0;
 
         let generation_list = get_generations(&path)?;
 
@@ -271,6 +285,7 @@ impl KvStore {
                     WriteCommand::Set(Set { key, value: _value }) => {
                         if let Some(old_value) = index.get(&key) {
                             fragmentation = fragmentation + old_value.value().len;
+                            live_bytes = live_bytes - old_value.value().len;
                         }
                         index.insert(
                             key,
@@ -280,12 +295,14 @@ impl KvStore {
                                 generation: generation,
                             },
                         );
+                        live_bytes = live_bytes + end_pos - pos;
                     }
                     WriteCommand::Rm(Rm { key }) => {
                         if let Some(removed_value) = index.remove(&key) {
                             fragmentation = fragmentation + removed_value.value().len;
+                            live_bytes = live_bytes - removed_value.value().len;
                         }
-                        fragmentation = fragmentation + end_pos - pos;
+                        fragmentation = fragmentation + (end_pos - pos);
                     }
                 };
                 pos = end_pos;
@@ -295,6 +312,7 @@ impl KvStore {
         let kv_store = SharedKvStore {
             writer: BufWriterWithPos::new(writer_file, 0),
             fragmentation,
+            live_bytes,
             current_generation: max_generation,
         };
 
