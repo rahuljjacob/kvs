@@ -16,9 +16,10 @@ static PORT: AtomicUsize = AtomicUsize::new(5000);
 
 fn thread_counts() -> Vec<usize> {
     let max_threads = 2 * num_cpus::get();
-    let mut inputs = vec![1];
-    inputs.extend((2..=max_threads).step_by(2));
-    inputs
+    (0..)
+        .map(|exp| 1 << exp)
+        .take_while(|&threads| threads <= max_threads)
+        .collect()
 }
 
 fn kvs_write(c: &mut Criterion) {
