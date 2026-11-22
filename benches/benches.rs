@@ -14,6 +14,10 @@ use tempfile::TempDir;
 // Common PORT
 static PORT: AtomicUsize = AtomicUsize::new(5000);
 
+// Concurrent client threads in the server benchmarks. Kept under the macOS
+// accept-queue limit (128) so connections are not dropped and retried.
+const CLIENT_THREADS: u32 = 100;
+
 fn thread_counts() -> Vec<usize> {
     let max_threads = 2 * num_cpus::get();
     (0..)
@@ -179,7 +183,7 @@ fn write_queued_kvstore(c: &mut Criterion) {
             thread::sleep(Duration::from_millis(100));
 
             let keys: Vec<String> = (0..1000).map(|i| format!("key{:08}", i)).collect();
-            let client_pool = SharedQueueThreadPool::new(1000).unwrap();
+            let client_pool = SharedQueueThreadPool::new(CLIENT_THREADS).unwrap();
             let errors = Arc::new(AtomicUsize::new(0));
             // --- measured ---
             b.iter(|| {
@@ -229,7 +233,7 @@ fn read_queued_kvstore(c: &mut Criterion) {
             thread::sleep(Duration::from_millis(100));
 
             let keys: Vec<String> = (0..1000).map(|i| format!("key{:08}", i)).collect();
-            let client_pool = SharedQueueThreadPool::new(1000).unwrap();
+            let client_pool = SharedQueueThreadPool::new(CLIENT_THREADS).unwrap();
             let errors = Arc::new(AtomicUsize::new(0));
 
             let setup_client = KvsClient::new(addr.clone());
@@ -287,7 +291,7 @@ fn write_rayon_kvstore(c: &mut Criterion) {
             thread::sleep(Duration::from_millis(100));
 
             let keys: Vec<String> = (0..1000).map(|i| format!("key{:08}", i)).collect();
-            let client_pool = SharedQueueThreadPool::new(1000).unwrap();
+            let client_pool = SharedQueueThreadPool::new(CLIENT_THREADS).unwrap();
             let errors = Arc::new(AtomicUsize::new(0));
 
             b.iter(|| {
@@ -337,7 +341,7 @@ fn read_rayon_kvstore(c: &mut Criterion) {
             thread::sleep(Duration::from_millis(100));
 
             let keys: Vec<String> = (0..1000).map(|i| format!("key{:08}", i)).collect();
-            let client_pool = SharedQueueThreadPool::new(1000).unwrap();
+            let client_pool = SharedQueueThreadPool::new(CLIENT_THREADS).unwrap();
             let errors = Arc::new(AtomicUsize::new(0));
 
             let setup_client = KvsClient::new(addr.clone());
@@ -395,7 +399,7 @@ fn write_rayon_sledkvengine(c: &mut Criterion) {
             thread::sleep(Duration::from_millis(100));
 
             let keys: Vec<String> = (0..1000).map(|i| format!("key{:08}", i)).collect();
-            let client_pool = SharedQueueThreadPool::new(1000).unwrap();
+            let client_pool = SharedQueueThreadPool::new(CLIENT_THREADS).unwrap();
             let errors = Arc::new(AtomicUsize::new(0));
 
             b.iter(|| {
@@ -445,7 +449,7 @@ fn read_rayon_sledkvengine(c: &mut Criterion) {
             thread::sleep(Duration::from_millis(100));
 
             let keys: Vec<String> = (0..1000).map(|i| format!("key{:08}", i)).collect();
-            let client_pool = SharedQueueThreadPool::new(1000).unwrap();
+            let client_pool = SharedQueueThreadPool::new(CLIENT_THREADS).unwrap();
             let errors = Arc::new(AtomicUsize::new(0));
 
             let setup_client = KvsClient::new(addr.clone());
